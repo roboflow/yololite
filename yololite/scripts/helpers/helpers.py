@@ -174,7 +174,8 @@ def _coco_eval_from_lists(coco_images, coco_anns, coco_dets, iouType="bbox", num
         # Returnera nollor – så träningsloopen kan fortsätta utan krasch
         return {
             "AP": 0.0, "AP50": 0.0, "AP75": 0.0,
-            "APS": 0.0, "APM": 0.0, "APL": 0.0, "AR": 0.0
+            "APS": 0.0, "APM": 0.0, "APL": 0.0,
+            "AR": 0.0, "ARS": 0.0, "ARM": 0.0, "ARL": 0.0,
         }
 
     # --- Bestäm klasser (som tidigare)
