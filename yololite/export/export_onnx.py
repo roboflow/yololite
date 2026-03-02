@@ -110,7 +110,7 @@ def build_model_from_meta(meta: dict) -> nn.Module:
     try:
         from yololite.scripts.model.model_v2 import YOLOLiteMS, YOLOLiteMS_CPU
     except ImportError:
-        from scripts.model.model_v2 import YOLOLiteMS, YOLOLiteMS_CPU
+        from yololite.scripts.model.model_v2 import YOLOLiteMS, YOLOLiteMS_CPU
 
     cfg  = meta.get("config", {}) or {}
     mcfg = cfg.get("model", {}) or {}

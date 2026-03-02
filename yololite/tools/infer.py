@@ -19,11 +19,11 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 # Modeller (samma som i train)
-from scripts.model.model_v2 import YOLOLiteMS, YOLOLiteMS_CPU  # ändra om din väg skiljer
+from yololite.scripts.model.model_v2 import YOLOLiteMS, YOLOLiteMS_CPU  # ändra om din väg skiljer
 
 # Projektets decoder (om finns)
 try:
-    from scripts.helpers.utils_ms import decode_preds_anchorfree as project_decode  # din tränings-decode
+    from yololite.scripts.helpers.utils_ms import decode_preds_anchorfree as project_decode  # din tränings-decode
     HAS_PROJECT_DECODER = True
 except Exception:
     HAS_PROJECT_DECODER = False

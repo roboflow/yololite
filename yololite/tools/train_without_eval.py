@@ -11,17 +11,17 @@ ROOT = os.getcwd()
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 from torch.utils.data import DataLoader
-from scripts.model.model_v2 import YOLOLiteMS, YOLOLiteMS_CPU
-from scripts.data.dataset import YoloDataset
-from scripts.data.augment import get_base_transform, get_val_transform, get_strong_transform
-from scripts.loss.loss import LossAF
-from scripts.helpers.sanity_check import visualize_batch
-from scripts.helpers.schedulers import build_scheduler
-from scripts.helpers.helpers import yolo_collate, _coco_eval_from_lists,  set_seed, save_val_debug_anchorfree, _decode_batch_to_coco_dets, _xyxy_to_xywh, _write_json_atomic, _append_csv
-from scripts.args.build_args import build_argparser, load_configs, apply_overrides
-from scripts.data.plot_metrics import plot_metrics
-from scripts.data.p_r_f1 import build_curves_from_coco
-from scripts.helpers.evaluate import evaluate_model
+from yololite.scripts.model.model_v2 import YOLOLiteMS, YOLOLiteMS_CPU
+from yololite.scripts.data.dataset import YoloDataset
+from yololite.scripts.data.augment import get_base_transform, get_val_transform, get_strong_transform
+from yololite.scripts.loss.loss import LossAF
+from yololite.scripts.helpers.sanity_check import visualize_batch
+from yololite.scripts.helpers.schedulers import build_scheduler
+from yololite.scripts.helpers.helpers import yolo_collate, _coco_eval_from_lists,  set_seed, save_val_debug_anchorfree, _decode_batch_to_coco_dets, _xyxy_to_xywh, _write_json_atomic, _append_csv
+from yololite.scripts.args.build_args import build_argparser, load_configs, apply_overrides
+from yololite.scripts.data.plot_metrics import plot_metrics
+from yololite.scripts.data.p_r_f1 import build_curves_from_coco
+from yololite.scripts.helpers.evaluate import evaluate_model
 
 def save_checkpoint_state(model, metrics: dict, class_names, config: dict, out_path: str):
     cpu_state = {k: v.cpu() for k, v in model.state_dict().items()}

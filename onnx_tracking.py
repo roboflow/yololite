@@ -1,5 +1,5 @@
-from tools.infer_onnx import ONNX_Predict
-from tools.tracker import KalmanSortTracker
+from yololite.tools.infer_onnx import ONNX_Predict
+from yololite.tools.tracker import KalmanSortTracker
 import cv2
 import time
 import collections

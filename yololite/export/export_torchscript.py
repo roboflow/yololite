@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 # Samma modeller som train/infer
-from scripts.model.model_v2 import YOLOLiteMS, YOLOLiteMS_CPU  # ändra om din väg skiljer
+from yololite.scripts.model.model_v2 import YOLOLiteMS, YOLOLiteMS_CPU  # ändra om din väg skiljer
 
 # ========= utils =========
 def must(msg: str):

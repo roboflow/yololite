@@ -10,10 +10,10 @@ if str(ROOT) not in sys.path:
 from tools.infer import load_model_names_imgsize_from_ckpt
 from torch.utils.data import DataLoader
 
-from scripts.data.dataset import YoloDataset
-from scripts.data.augment import get_val_transform
-from scripts.helpers.helpers import yolo_collate
-from scripts.helpers.evaluate import evaluate_model
+from yololite.scripts.data.dataset import YoloDataset
+from yololite.scripts.data.augment import get_val_transform
+from yololite.scripts.helpers.helpers import yolo_collate
+from yololite.scripts.helpers.evaluate import evaluate_model
 import argparse
 
 def _next_run_dir(base: str) -> str:

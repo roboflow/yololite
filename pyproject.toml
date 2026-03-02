@@ -15,4 +15,10 @@ dynamic = ["dependencies"]
 dependencies = {file = ["requirements.txt"]}
 
 [tool.setuptools.packages.find]
-exclude = ["augmentation*", "export*", "configs*", "images*", "*.tests*"]
+where = ["."]
+include = ["yololite*"]
+
+[tool.setuptools.package-data]
+yololite = [
+    "configs/**/*.yaml"
+]

@@ -14,8 +14,8 @@ import seaborn as sns
 ROOT = os.getcwd()
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
-from scripts.helpers.helpers import  _coco_eval_from_lists, _decode_batch_to_coco_dets, _xyxy_to_xywh
-from scripts.data.p_r_f1 import build_curves_from_coco
+from yololite.scripts.helpers.helpers import  _coco_eval_from_lists, _decode_batch_to_coco_dets, _xyxy_to_xywh
+from yololite.scripts.data.p_r_f1 import build_curves_from_coco
 from sklearn.metrics import confusion_matrix
 import numpy as np
 

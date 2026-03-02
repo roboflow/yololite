@@ -6,8 +6,8 @@ from torch.utils.data import DataLoader
 ROOT = os.getcwd()
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
-from scripts.data.dataset import YoloDataset
-from scripts.data.augment import get_base_transform, get_val_transform
+from yololite.scripts.data.dataset import YoloDataset
+from yololite.scripts.data.augment import get_base_transform, get_val_transform
 import matplotlib.patches as patches
 
 def denormalize(img_tensor):

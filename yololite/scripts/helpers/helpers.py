@@ -7,7 +7,7 @@ import torch.nn as nn
 ROOT = os.getcwd()
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
-from scripts.helpers.utils_ms import decode_preds_anchorfree
+from yololite.scripts.helpers.utils_ms import decode_preds_anchorfree
 import json, os
 
 
