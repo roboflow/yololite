@@ -78,13 +78,17 @@ def build_curves_from_coco(coco_images, coco_anns, coco_dets,
 
     if len(tps) == 0:
         # inga prediktioner: skriv tomma filer och returnera
+        _confs = np.linspace(0.0, 1.0, steps)
         return {
             "iou": float(iou),
             "best_f1": 0.0,
             "best_conf": 0.0,
             "precision_at_best": 0.0,
             "recall_at_best": 0.0,
-            
+            "confs": _confs,
+            "P_curve": np.zeros(steps),
+            "R_curve": np.zeros(steps),
+            "F1_curve": np.zeros(steps),
         }
 
     tps = np.array(tps); fps = np.array(fps)
