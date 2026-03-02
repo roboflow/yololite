@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yololite"
+version = "0.1.0"
+description = "Lightweight YOLO for PyTorch with ONNX export"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.packages.find]
+exclude = ["augmentation*", "export*", "configs*", "images*", "*.tests*"]
