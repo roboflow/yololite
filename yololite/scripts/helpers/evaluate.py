@@ -10,6 +10,7 @@ import matplotlib
 matplotlib.use("Agg") 
 import matplotlib.pyplot as plt
 from collections import defaultdict
+import seaborn as sns
 ROOT = os.getcwd()
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
@@ -216,7 +217,6 @@ def create_confusion_matrix(
     cm_normalized = cm.astype('float') / row_sums
 
     # Plot
-    import seaborn as sns
     fig, ax = plt.subplots(figsize=(10, 8))
     sns.heatmap(
         cm_normalized,
