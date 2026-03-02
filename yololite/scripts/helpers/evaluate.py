@@ -1,5 +1,4 @@
 # train.py
-from __future__ import annotations
 import os, yaml, time, random, sys
 import numpy as np
 import torch
@@ -16,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 from yololite.scripts.helpers.helpers import  _coco_eval_from_lists, _decode_batch_to_coco_dets, _xyxy_to_xywh
 from yololite.scripts.data.p_r_f1 import build_curves_from_coco
+from sklearn.metrics import confusion_matrix
 import numpy as np
 
 
@@ -156,7 +156,6 @@ def create_confusion_matrix(
                 y_pred.append(bg_idx)
 
     # Nu har vi y_true och y_pred med samma längd
-    from sklearn.metrics import confusion_matrix
     cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes + 1)))
         # -------------------------------------------------
     # RÄKNA TP / FP / FN (råa counts, INNAN normalisering)
@@ -239,6 +238,7 @@ def create_confusion_matrix(
     plt.close()
 # utils/summary_cards.py
 from typing import Dict, List, Tuple, Optional, Union
+from PIL import Image, ImageDraw, ImageFont
 import math
 
 Number = Union[int, float]
@@ -311,7 +311,6 @@ def _format_ms(ms: float) -> tuple:
     return (round(ms, 3), round(fps, 2))
 
 def _load_font(size: int):
-    from PIL import ImageFont
     for name in ("DejaVuSans.ttf", "arial.ttf"):
         try:
             return ImageFont.truetype(name, size)
@@ -367,7 +366,6 @@ def make_summary_image(
     W = pad*2 + cards_per_row*card_w + (cards_per_row-1)*gap
     H = pad*2 + rows*card_h + (rows-1)*gap + 70  # plats för rubrik
 
-    from PIL import Image, ImageDraw
     img = Image.new("RGB", (W, H), (255,255,255))
     draw = ImageDraw.Draw(img)
 
