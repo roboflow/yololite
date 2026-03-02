@@ -219,6 +219,12 @@ def load_configs(model_yaml: str, train_yaml: str, data_yaml: str) -> Dict[str, 
     _deep_merge(config, model_cfg)
     _deep_merge(config, train_cfg)
 
+    # --- Defaults for keys absent from standard YAMLs but required by training loop ---
+    config.setdefault("training", {}).setdefault("device", "0")
+    config["training"].setdefault("use_p2", False)
+    config["training"].setdefault("resize", False)
+    config.setdefault("model", {}).setdefault("num_anchors_per_level", 1)
+
     # --- Säkerställ logging + auto-inkrementerande run-dir ---
     log_cfg = config.get("logging", {})
     base_log_dir = log_cfg.get("log_dir")  # kan vara None eller t.ex. 'runs' / 'runs/weeds'
