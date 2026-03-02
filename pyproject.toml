@@ -12,7 +12,7 @@ requires-python = ">=3.8"
 dynamic = ["dependencies"]
 
 [tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
+dependencies = {file = ["requirements.txt", "yololite/export/requirements.txt"]}
 
 [tool.setuptools.packages.find]
 where = ["."]
