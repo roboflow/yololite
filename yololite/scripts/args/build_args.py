@@ -127,7 +127,7 @@ def _labels_or_fallback(lbl_path: str, img_path: str, split: str, data_yaml: str
         return str((p.parent / "labels").resolve())
     return ""
 
-def load_configs(model_yaml: str, train_yaml: str, data_yaml: str) -> Dict[str, Any]:
+def load_configs(model_yaml: str, train_yaml: str, data_yaml: str, log_dir: str = None) -> Dict[str, Any]:
     # ... (din befintliga setup) ...
     model_yaml = _norm(model_yaml) if model_yaml else None
     train_yaml = _norm(train_yaml) if train_yaml else None
@@ -227,7 +227,7 @@ def load_configs(model_yaml: str, train_yaml: str, data_yaml: str) -> Dict[str, 
 
     # --- Säkerställ logging + auto-inkrementerande run-dir ---
     log_cfg = config.get("logging", {})
-    base_log_dir = log_cfg.get("log_dir")  # kan vara None eller t.ex. 'runs' / 'runs/weeds'
+    base_log_dir = log_dir if log_dir else log_cfg.get("log_dir")  # kan vara None eller t.ex. 'runs' / 'runs/weeds'
 
     # Standardbas om inget angetts
     if not base_log_dir or not str(base_log_dir).strip():
