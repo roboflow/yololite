@@ -20,6 +20,30 @@ from sklearn.metrics import confusion_matrix
 import numpy as np
 
 
+def build_roboflow_metrics_dict(
+    coco_stats,
+    pr_summary,
+    box_loss=None,
+    cls_loss=None,
+    obj_loss=None,
+):
+    roboflow_metrics = {
+        "mAP": coco_stats["AP"],
+        "mAP@50": coco_stats["AP50"],
+        "mAP@50:95": coco_stats["AP"],
+        "precision": float(pr_summary["precision_at_best"]),
+        "recall": float(pr_summary["recall_at_best"]),
+    }
+    if box_loss is not None:
+        roboflow_metrics["box_loss"] = box_loss
+    if cls_loss is not None:
+        roboflow_metrics["cls_loss"] = cls_loss   
+    if obj_loss is not None:
+        roboflow_metrics["obj_loss"] = obj_loss   
+
+    return roboflow_metrics
+
+
 def xywh_to_xyxy(box):
     x, y, w, h = box
     return np.array([x, y, x + w, y + h], dtype=np.float32)
@@ -603,7 +627,5 @@ def evaluate_model(model, val_loader, log_dir, NUM_CLASSES, DEVICE, IMG_SIZE, ba
         cards_per_row=3,
         save_path=f"{log_dir}/summary.png",
     )
-        
-        
-   
 
+    return build_roboflow_metrics_dict(coco_stats, summary)

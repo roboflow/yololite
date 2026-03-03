@@ -144,7 +144,8 @@ def run_training(config: dict, callbacks=None) -> dict:
             _xyxy_to_xywh, _write_json_atomic, _append_csv,
         )
         from yololite.scripts.data.plot_metrics import plot_metrics
-        from yololite.scripts.helpers.evaluate import evaluate_model
+        from yololite.scripts.helpers.evaluate import evaluate_model, build_roboflow_metrics_dict
+        from yololite.scripts.data.p_r_f1 import build_curves_from_coco
     except ImportError:
         from yololite.scripts.model.model_v2 import YOLOLiteMS, YOLOLiteMS_CPU
         from yololite.scripts.data.dataset import YoloDataset
@@ -158,7 +159,8 @@ def run_training(config: dict, callbacks=None) -> dict:
             _xyxy_to_xywh, _write_json_atomic, _append_csv,
         )
         from yololite.scripts.data.plot_metrics import plot_metrics
-        from yololite.scripts.helpers.evaluate import evaluate_model
+        from yololite.scripts.helpers.evaluate import evaluate_model, build_roboflow_metrics_dict
+        from yololite.scripts.data.p_r_f1 import build_curves_from_coco
 
     _DEVICE = config["training"]["device"]
     DEVICE = f"cuda:{_DEVICE}" if torch.cuda.is_available() else "cpu"
@@ -368,6 +370,7 @@ def run_training(config: dict, callbacks=None) -> dict:
     best_metric_no_aug = -1.0
     val_thresh = 0.3
     coco_stats = {}
+    epoch_metrics = {}
     epochs_completed = 0
 
     for epoch in range(epochs):
@@ -544,6 +547,10 @@ def run_training(config: dict, callbacks=None) -> dict:
         coco_stats = _coco_eval_from_lists(
             coco_images, coco_anns, coco_dets, iouType="bbox", num_classes=NUM_CLASSES
         )
+        pr_summary = build_curves_from_coco(
+            coco_images=coco_images, coco_anns=coco_anns, coco_dets=coco_dets,
+            out_dir=os.path.join(log_dir, "curves"), iou=0.50, steps=201,
+        )
         coco_images, coco_anns, coco_dets = [], [], []
         elapsed = time.time() - start
 
@@ -621,13 +628,11 @@ def run_training(config: dict, callbacks=None) -> dict:
         )
 
         # ---- callbacks ----
-        epoch_metrics = {
-            "AP": coco_stats["AP"], "AP50": coco_stats["AP50"],
-            "AP75": coco_stats["AP75"], "APS": coco_stats["APS"],
-            "APM": coco_stats["APM"], "APL": coco_stats["APL"],
-            "AR": coco_stats["AR"],
-            "train_loss": avg_train, "val_loss": avg_val,
-        }
+        n_val = max(1, len(val_loader))
+        epoch_metrics = build_roboflow_metrics_dict(
+            coco_stats, pr_summary,
+            box_loss=vb / n_val, cls_loss=vc / n_val, obj_loss=vo / n_val,
+        )
         if callbacks is not None and hasattr(callbacks, 'on_epoch_end'):
             callbacks.on_epoch_end(epoch, epoch_metrics)
         if callbacks is not None and hasattr(callbacks, 'on_checkpoint'):
@@ -654,9 +659,9 @@ def run_training(config: dict, callbacks=None) -> dict:
         ckpt = torch.load(best_no_aug, map_location=DEVICE)
     missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
     model.eval()
-    evaluate_model(model=model, val_loader=val_loader, log_dir=log_dir,
-                   NUM_CLASSES=NUM_CLASSES, DEVICE=DEVICE, IMG_SIZE=IMG_SIZE,
-                   batch_size=batch_size, class_names=class_names)
+    best_metrics = evaluate_model(model=model, val_loader=val_loader, log_dir=log_dir,
+                                   NUM_CLASSES=NUM_CLASSES, DEVICE=DEVICE, IMG_SIZE=IMG_SIZE,
+                                   batch_size=batch_size, class_names=class_names)
 
     # Resolve best checkpoint path
     if os.path.exists(best_ckpt_path):
@@ -670,7 +675,7 @@ def run_training(config: dict, callbacks=None) -> dict:
         "best_checkpoint": final_best,
         "last_checkpoint": last_ckpt_path,
         "epochs_completed": epochs_completed,
-        "best_metrics": coco_stats,
+        "best_metrics": best_metrics,
         "class_names": list(class_names),
     }
 
