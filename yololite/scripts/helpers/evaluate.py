@@ -20,7 +20,7 @@ from sklearn.metrics import confusion_matrix
 import numpy as np
 
 
-def build_roboflow_metrics_dict(
+def build_roboflow_epoch_metrics_dict(
     coco_stats,
     pr_summary,
     box_loss=None,
@@ -28,8 +28,7 @@ def build_roboflow_metrics_dict(
     obj_loss=None,
 ):
     roboflow_metrics = {
-        "mAP": coco_stats["AP"],
-        "mAP_50": coco_stats["AP50"],
+        "mAP": coco_stats["AP50"],
         "mAP_50_95": coco_stats["AP"],
         "precision": float(pr_summary["precision_at_best"]),
         "recall": float(pr_summary["recall_at_best"]),
@@ -628,4 +627,4 @@ def evaluate_model(model, val_loader, log_dir, NUM_CLASSES, DEVICE, IMG_SIZE, ba
         save_path=f"{log_dir}/summary.png",
     )
 
-    return build_roboflow_metrics_dict(coco_stats, summary)
+    return build_roboflow_epoch_metrics_dict(coco_stats, summary)

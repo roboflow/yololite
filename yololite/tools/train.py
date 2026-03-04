@@ -144,7 +144,7 @@ def run_training(config: dict, callbacks=None) -> dict:
             _xyxy_to_xywh, _write_json_atomic, _append_csv,
         )
         from yololite.scripts.data.plot_metrics import plot_metrics
-        from yololite.scripts.helpers.evaluate import evaluate_model, build_roboflow_metrics_dict
+        from yololite.scripts.helpers.evaluate import evaluate_model, build_roboflow_epoch_metrics_dict
         from yololite.scripts.data.p_r_f1 import build_curves_from_coco
     except ImportError:
         from yololite.scripts.model.model_v2 import YOLOLiteMS, YOLOLiteMS_CPU
@@ -159,7 +159,7 @@ def run_training(config: dict, callbacks=None) -> dict:
             _xyxy_to_xywh, _write_json_atomic, _append_csv,
         )
         from yololite.scripts.data.plot_metrics import plot_metrics
-        from yololite.scripts.helpers.evaluate import evaluate_model, build_roboflow_metrics_dict
+        from yololite.scripts.helpers.evaluate import evaluate_model, build_roboflow_epoch_metrics_dict
         from yololite.scripts.data.p_r_f1 import build_curves_from_coco
 
     _DEVICE = config["training"]["device"]
@@ -629,7 +629,7 @@ def run_training(config: dict, callbacks=None) -> dict:
 
         # ---- callbacks ----
         n_val = max(1, len(val_loader))
-        epoch_metrics = build_roboflow_metrics_dict(
+        epoch_metrics = build_roboflow_epoch_metrics_dict(
             coco_stats, pr_summary,
             box_loss=vb / n_val, class_loss=vc / n_val, obj_loss=vo / n_val,
         )
