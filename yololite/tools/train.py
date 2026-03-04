@@ -631,7 +631,7 @@ def run_training(config: dict, callbacks=None) -> dict:
         n_val = max(1, len(val_loader))
         epoch_metrics = build_roboflow_metrics_dict(
             coco_stats, pr_summary,
-            box_loss=vb / n_val, cls_loss=vc / n_val, obj_loss=vo / n_val,
+            box_loss=vb / n_val, class_loss=vc / n_val, obj_loss=vo / n_val,
         )
         if callbacks is not None and hasattr(callbacks, 'on_epoch_end'):
             callbacks.on_epoch_end(epoch, epoch_metrics)

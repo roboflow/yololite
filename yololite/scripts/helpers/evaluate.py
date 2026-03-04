@@ -24,20 +24,20 @@ def build_roboflow_metrics_dict(
     coco_stats,
     pr_summary,
     box_loss=None,
-    cls_loss=None,
+    class_loss=None,
     obj_loss=None,
 ):
     roboflow_metrics = {
         "mAP": coco_stats["AP"],
-        "mAP@50": coco_stats["AP50"],
-        "mAP@50:95": coco_stats["AP"],
+        "mAP_50": coco_stats["AP50"],
+        "mAP_50_95": coco_stats["AP"],
         "precision": float(pr_summary["precision_at_best"]),
         "recall": float(pr_summary["recall_at_best"]),
     }
     if box_loss is not None:
         roboflow_metrics["box_loss"] = box_loss
-    if cls_loss is not None:
-        roboflow_metrics["cls_loss"] = cls_loss   
+    if class_loss is not None:
+        roboflow_metrics["class_loss"] = class_loss
     if obj_loss is not None:
         roboflow_metrics["obj_loss"] = obj_loss   
 
