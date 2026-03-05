@@ -228,8 +228,7 @@ def run_training(config: dict, callbacks=None) -> dict:
     )
 
     # Skip TIMM pretrained backbone download when custom weights will be loaded
-    _has_custom_weights = (config["training"]["resume"] is not None
-                           or config["training"].get("pretrained_weights") is not None)
+    _has_custom_weights = config["training"]["resume"] is not None
     _backbone_pretrained = config["training"].get("pretrained", True) and not _has_custom_weights
 
     if config["model"]["arch"].lower() == 'yololitems':
@@ -359,35 +358,16 @@ def run_training(config: dict, callbacks=None) -> dict:
     best_metric = -1.0
     best_metric_no_aug = -1.0
 
-    # ---- load pretrained weights (fine-tuning: weights only, no optimizer/epoch restore) ----
-    if config["training"].get("pretrained_weights") is not None:
-        _pw_path = config["training"]["pretrained_weights"]
-        _pw = torch.load(_pw_path, map_location=DEVICE, weights_only=False)
-        if isinstance(_pw, dict) and "state_dict" in _pw:
-            _pw_sd = _pw["state_dict"]
-        else:
-            _pw_sd = _pw
-        missing, unexpected = model.load_state_dict(_pw_sd, strict=False)
-        print(f"Loaded pretrained weights from {_pw_path}: "
-              f"missing={len(missing)}, unexpected={len(unexpected)}")
-        if missing:
-            from yololite.scripts.model.model_v2 import init_detect_bias
-            for hn in ["head3", "head4", "head5", "head", "head2", "head6"]:
-                h = getattr(model, hn, None)
-                if h is not None and any(f"{hn}." in k for k in missing):
-                    init_detect_bias(h, NUM_CLASSES)
-                    print(f"Reinitialized detection head '{hn}' bias for {NUM_CLASSES} classes")
-        if use_ema:
-            ema = ModelEMA(model, total_updates=total_updates, decay=ema_decay)
-
-    # ---- resume from checkpoint (full state restore for pre-emption recovery) ----
+    # ---- load from checkpoint ----
+    # If training_state is present, full resume (optimizer, scheduler, epoch, EMA).
+    # Otherwise, weights-only warm-start (e.g. pretrained model with different classes).
     if config["training"]["resume"] is not None:
         ckpt = torch.load(config["training"]["resume"], map_location=DEVICE, weights_only=False)
         if isinstance(ckpt, dict) and "state_dict" in ckpt:
             missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
         else:
             missing, unexpected = model.load_state_dict(ckpt, strict=False)
-        print(f"Resumed model weights: missing={len(missing)}, unexpected={len(unexpected)}")
+        print(f"Loaded checkpoint weights: missing={len(missing)}, unexpected={len(unexpected)}")
 
         ts = ckpt.get("training_state") if isinstance(ckpt, dict) else None
         if ts is not None:
@@ -408,6 +388,14 @@ def run_training(config: dict, callbacks=None) -> dict:
             print(f"Restored training state: start_epoch={start_epoch}, "
                   f"best_metric={best_metric:.4f}")
         else:
+            # Weights-only: reinitialize detection heads if classes changed
+            if missing:
+                from yololite.scripts.model.model_v2 import init_detect_bias
+                for hn in ["head3", "head4", "head5", "head", "head2", "head6"]:
+                    h = getattr(model, hn, None)
+                    if h is not None and any(f"{hn}." in k for k in missing):
+                        init_detect_bias(h, NUM_CLASSES)
+                        print(f"Reinitialized detection head '{hn}' bias for {NUM_CLASSES} classes")
             if use_ema:
                 ema = ModelEMA(model, total_updates=total_updates, decay=ema_decay)
             print("No training_state in checkpoint — warm-starting weights only")
