@@ -49,12 +49,19 @@ class ModelEMA:
                 v.copy_(msd[k])
 
     def state_dict(self):
-        return self.ema.state_dict()
+        return {
+            "ema_weights": self.ema.state_dict(),
+            "updates": self.updates,
+        }
+
+    def load_state_dict(self, state):
+        self.ema.load_state_dict(state["ema_weights"])
+        self.updates = state["updates"]
 
 
 def save_checkpoint_state(model, metrics: dict, class_names, config: dict,
                           out_path: str, num_anchors_per_level: tuple,
-                          metric_key: str):
+                          metric_key: str, training_state: dict = None):
     cpu_state = {k: v.cpu() for k, v in model.state_dict().items()}
     meta = {
         "metric_key": metric_key,
@@ -67,7 +74,10 @@ def save_checkpoint_state(model, metrics: dict, class_names, config: dict,
         "num_anchors_per_level": num_anchors_per_level,
         "config": config,
     }
-    torch.save({"state_dict": cpu_state, "meta": meta}, out_path)
+    payload = {"state_dict": cpu_state, "meta": meta}
+    if training_state is not None:
+        payload["training_state"] = training_state
+    torch.save(payload, out_path)
 
 
 def _build_num_anchors(use_p6, use_p2, num):
@@ -217,6 +227,10 @@ def run_training(config: dict, callbacks=None) -> dict:
         config["training"]["use_p6"], config["training"]["use_p2"], num
     )
 
+    # Skip TIMM pretrained backbone download when custom weights will be loaded
+    _has_custom_weights = config["training"]["resume"] is not None
+    _backbone_pretrained = config["training"].get("pretrained", True) and not _has_custom_weights
+
     if config["model"]["arch"].lower() == 'yololitems':
         model = YOLOLiteMS(
             backbone=config["model"]["backbone"],
@@ -227,7 +241,8 @@ def run_training(config: dict, callbacks=None) -> dict:
             head_depth=config["model"].get("head_depth", 1),
             num_anchors_per_level=num_anchors_per_level,
             use_p6=config["training"]["use_p6"],
-            use_p2=config["training"]["use_p2"]
+            use_p2=config["training"]["use_p2"],
+            pretrained=_backbone_pretrained,
         ).to(DEVICE)
     elif config["model"]["arch"].lower() == 'yololitems_cpu':
         model = YOLOLiteMS_CPU(
@@ -239,7 +254,8 @@ def run_training(config: dict, callbacks=None) -> dict:
             width_multiple=config["model"].get("width_multiple", 1.0),
             head_depth=config["model"].get("head_depth", 1),
             use_p6=config["training"]["use_p6"],
-            use_p2=config["training"]["use_p2"]
+            use_p2=config["training"]["use_p2"],
+            pretrained=_backbone_pretrained,
         ).to(DEVICE)
 
     epochs = int(config["training"]["epochs"])
@@ -338,11 +354,51 @@ def run_training(config: dict, callbacks=None) -> dict:
     images, targets = next(iter(train_loader))
     visualize_batch(images, targets, save_path=os.path.join(log_dir, "sanity_check.jpg"))
 
+    start_epoch = 0
+    best_metric = -1.0
+    best_metric_no_aug = -1.0
+
+    # ---- load from checkpoint ----
+    # If training_state is present, full resume (optimizer, scheduler, epoch, EMA).
+    # Otherwise, weights-only warm-start (e.g. pretrained model with different classes).
     if config["training"]["resume"] is not None:
-        ckpt = torch.load(config["training"]["resume"], map_location=DEVICE)
-        missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
-        print("missing:", len(missing), "unexpected:", len(unexpected))
-        ema = ModelEMA(model, total_updates=total_updates, decay=0.995)
+        ckpt = torch.load(config["training"]["resume"], map_location=DEVICE, weights_only=False)
+        if isinstance(ckpt, dict) and "state_dict" in ckpt:
+            missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
+        else:
+            missing, unexpected = model.load_state_dict(ckpt, strict=False)
+        print(f"Loaded checkpoint weights: missing={len(missing)}, unexpected={len(unexpected)}")
+
+        ts = ckpt.get("training_state") if isinstance(ckpt, dict) else None
+        if ts is not None:
+            optimizer.load_state_dict(ts["optimizer"])
+            if scheduler is not None and "scheduler" in ts:
+                scheduler.load_state_dict(ts["scheduler"])
+            if use_ema and "ema" in ts:
+                ema.load_state_dict(ts["ema"])
+            else:
+                if use_ema:
+                    ema = ModelEMA(model, total_updates=total_updates, decay=ema_decay)
+            start_epoch = ts.get("epoch", 0) + 1
+            best_metric = ts.get("best_metric", -1.0)
+            best_metric_no_aug = ts.get("best_metric_no_aug", -1.0)
+            scaler_state = ts.get("scaler")
+            if scaler_state is not None:
+                scaler.load_state_dict(scaler_state)
+            print(f"Restored training state: start_epoch={start_epoch}, "
+                  f"best_metric={best_metric:.4f}")
+        else:
+            # Weights-only: reinitialize detection heads if classes changed
+            if missing:
+                from yololite.scripts.model.model_v2 import init_detect_bias
+                for hn in ["head3", "head4", "head5", "head", "head2", "head6"]:
+                    h = getattr(model, hn, None)
+                    if h is not None and any(f"{hn}." in k for k in missing):
+                        init_detect_bias(h, NUM_CLASSES)
+                        print(f"Reinitialized detection head '{hn}' bias for {NUM_CLASSES} classes")
+            if use_ema:
+                ema = ModelEMA(model, total_updates=total_updates, decay=ema_decay)
+            print("No training_state in checkpoint — warm-starting weights only")
 
     print(model)
     print(f"Starting training on {DEVICE}, {len(train_ds)} train images, {len(val_ds)} val images, img-size: {IMG_SIZE}")
@@ -352,7 +408,7 @@ def run_training(config: dict, callbacks=None) -> dict:
     Precision_fixed, Recall_fixed, F1_fixed = [], [], []
 
     warmup_epochs = int(config["training"].get("warmup_epochs", 0))
-    if warmup_epochs > 0 and sched_type != "onecycle":
+    if warmup_epochs > 0 and sched_type != "onecycle" and start_epoch == 0:
         for pg in optimizer.param_groups:
             pg["lr"] = base_lr * 0.1
 
@@ -366,14 +422,12 @@ def run_training(config: dict, callbacks=None) -> dict:
     last_ckpt_path = os.path.join(weight_folder, "last_model_state.pt")
     best_no_aug = os.path.join(weight_folder, "best_no_aug.pt")
     metric_key = save_by
-    best_metric = -1.0
-    best_metric_no_aug = -1.0
     val_thresh = 0.3
     coco_stats = {}
     epoch_metrics = {}
-    epochs_completed = 0
+    epochs_completed = start_epoch
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         if callbacks is not None and hasattr(callbacks, 'should_stop') and callbacks.should_stop():
             break
 
@@ -613,9 +667,23 @@ def run_training(config: dict, callbacks=None) -> dict:
                                   save_path, num_anchors_per_level, metric_key)
             model_eval.to(DEVICE).eval()
 
+        # Build training state for resume support
+        _training_state = {
+            "epoch": epoch,
+            "best_metric": best_metric,
+            "best_metric_no_aug": best_metric_no_aug,
+            "optimizer": optimizer.state_dict(),
+            "scaler": scaler.state_dict() if use_amp else None,
+        }
+        if scheduler is not None:
+            _training_state["scheduler"] = scheduler.state_dict()
+        if use_ema:
+            _training_state["ema"] = ema.state_dict()
+
         model_eval_cpu = model_eval.to("cpu").eval()
         save_checkpoint_state(model_eval_cpu, coco_stats, class_names, config,
-                              last_ckpt_path, num_anchors_per_level, metric_key)
+                              last_ckpt_path, num_anchors_per_level, metric_key,
+                              training_state=_training_state)
         model_eval.to(DEVICE).eval()
 
         epochs_completed = epoch + 1
