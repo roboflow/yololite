@@ -152,11 +152,12 @@ def _decode_batch_to_coco_dets(preds, img_size, conf_th=0.001, iou_th=0.65, add_
         out[b] = dets
     return out
 
-def _coco_eval_from_lists(coco_images, coco_anns, coco_dets, iouType="bbox", num_classes=None):
+def _coco_eval_from_lists(coco_images, coco_anns, coco_dets, iouType="bbox", num_classes=None, max_dets=100):
     """
     coco_images: [{"id":int,"file_name":str,"width":int,"height":int}, ...]
     coco_anns:   [{"id":int,"image_id":int,"category_id":int,"bbox":[x,y,w,h],"area":float,"iscrowd":0}, ...]
     coco_dets:   [{"image_id":int,"category_id":int,"bbox":[x,y,w,h],"score":float}, ...]
+    max_dets:    Maximum detections per image for AR/AP evaluation (default 100, COCO standard).
     """
     import os, json, tempfile
     from pycocotools.coco import COCO
@@ -208,6 +209,7 @@ def _coco_eval_from_lists(coco_images, coco_anns, coco_dets, iouType="bbox", num
         coco_gt = COCO(gt_path)
         coco_dt = coco_gt.loadRes(dt_path)
         E = COCOeval(coco_gt, coco_dt, iouType=iouType)
+        E.params.maxDets = [1, 10, max_dets]
         E.evaluate(); E.accumulate(); E.summarize()
         return {
             "AP":   float(E.stats[0]),

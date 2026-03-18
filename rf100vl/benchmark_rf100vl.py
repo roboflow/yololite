@@ -12,7 +12,6 @@ below if you have more (or fewer) resources.
 
 import os
 import sys
-import json
 import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -29,6 +28,7 @@ DATASETS_FORMAT = "yolov8"
 EPOCHS = 100
 BATCH_SIZE = 16
 IMG_SIZE = 640
+MAX_DETS = 500  # max detections per image for COCO eval on test split
 MAX_CONCURRENT_JOBS = 2  # conservative for 1× A100-40GB; increase if more GPUs
 
 # All yololite variants supported in roboflow-train (maps name → config path)
@@ -85,14 +85,24 @@ def _find_data_yaml(dataset_dir: str) -> str:
     raise FileNotFoundError(f"No data.yaml found in {dataset_dir}")
 
 
+def _find_test_folder(dataset_dir: str) -> str | None:
+    """Return the path to the test split folder (containing images/ and labels/)."""
+    for name in ("test", "Test"):
+        candidate = os.path.join(dataset_dir, name)
+        if os.path.isdir(os.path.join(candidate, "images")) and os.path.isdir(os.path.join(candidate, "labels")):
+            return candidate
+    return None
+
+
 def run_single_training(
     variant_name: str,
     dataset_dir: str,
     dataset_name: str,
 ) -> dict:
-    """Train one yololite variant on one dataset.  Runs in a worker process."""
+    """Train one yololite variant on one dataset, then evaluate on test split."""
     from yololite.scripts.args.build_args import load_configs
     from yololite.tools.train import run_training
+    from yololite.tools.evaluate import evaluate_on_folder
 
     configs_root = _pkg_files("yololite").joinpath("configs")
     subdir, yaml_file = YOLOLITE_VARIANTS[variant_name]
@@ -122,16 +132,36 @@ def run_single_training(
     config["training"]["device"] = "0"
 
     t0 = time.time()
-    result = run_training(config)
+    train_result = run_training(config)
     elapsed = time.time() - t0
 
-    best = result.get("best_metrics", {})
+    # Evaluate the best checkpoint on the test split with max_dets=500
+    best_ckpt = train_result["best_checkpoint"]
+    test_folder = _find_test_folder(dataset_dir)
+
+    if test_folder is not None:
+        eval_log_dir = os.path.join(log_dir, "test_eval")
+        os.makedirs(eval_log_dir, exist_ok=True)
+        test_metrics = evaluate_on_folder(
+            weights=best_ckpt,
+            test_folder=test_folder,
+            batch_size=BATCH_SIZE,
+            device="0",
+            max_dets=MAX_DETS,
+            log_dir=eval_log_dir,
+        )
+    else:
+        # Fall back to training's val-split metrics if no test split exists
+        test_metrics = train_result.get("best_metrics", {})
+
     return {
         "dataset": dataset_name,
         "variant": variant_name,
-        "mAP50": best.get("AP50", best.get("mAP", 0.0)),
-        "mAP50_95": best.get("AP", best.get("mAP_50_95", 0.0)),
-        "epochs_completed": result.get("epochs_completed", 0),
+        "mAP50": test_metrics.get("mAP", test_metrics.get("AP50", 0.0)),
+        "mAP50_95": test_metrics.get("mAP_50_95", test_metrics.get("AP", 0.0)),
+        "precision": test_metrics.get("precision", 0.0),
+        "recall": test_metrics.get("recall", 0.0),
+        "epochs_completed": train_result.get("epochs_completed", 0),
         "elapsed_s": round(elapsed, 1),
     }
 
@@ -224,7 +254,7 @@ def main():
 
     # Pivot tables for quick comparison
     if not df.empty and "error" not in df.columns or not df.get("error", pd.Series()).any():
-        for metric in ["mAP50", "mAP50_95"]:
+        for metric in ["mAP50", "mAP50_95", "precision", "recall"]:
             pivot = df.pivot_table(
                 index="dataset", columns="variant", values=metric, aggfunc="first",
             )
@@ -234,7 +264,7 @@ def main():
 
         # Mean across datasets per variant
         summary = (
-            df.groupby("variant")[["mAP50", "mAP50_95"]]
+            df.groupby("variant")[["mAP50", "mAP50_95", "precision", "recall"]]
             .mean()
             .sort_values("mAP50_95", ascending=False)
         )
