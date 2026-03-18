@@ -5,9 +5,10 @@ Downloads all RF100-VL datasets (yolov8 format) and trains every yololite
 variant for 100 epochs with batch_size=16.  Results (mAP@50 and mAP@50:95) are
 collected into a pandas DataFrame and saved as both CSV and a readable table.
 
-Concurrency: multiple training jobs run in parallel via a process pool.  With a
-single A100-40GB the default is 2 concurrent jobs — adjust MAX_CONCURRENT_JOBS
-below if you have more (or fewer) resources.
+Concurrency: training jobs run in parallel via a process pool, one variant at
+a time.  Each variant specifies how many concurrent jobs fit per GPU (based on
+VRAM footprint), so small models get higher parallelism than large ones.
+Adjust NUM_GPUS and per-variant jobs_per_gpu to match your hardware.
 """
 
 import os
@@ -29,20 +30,26 @@ EPOCHS = 100
 BATCH_SIZE = 16
 IMG_SIZE = 640
 MAX_DETS = 500  # max detections per image for COCO eval on test split
-MAX_CONCURRENT_JOBS = 2  # conservative for 1× A100-40GB; increase if more GPUs
 
-# All yololite variants supported in roboflow-train (maps name → config path)
+# ── GPU concurrency ───────────────────────────────────────────────────────────
+NUM_GPUS = 8  # number of GPUs available (A100-80GB)
+
+# All yololite variants supported in roboflow-train.
+# Each entry: (config_subdir, config_yaml, jobs_per_gpu).
+# jobs_per_gpu = floor(80 GB / estimated VRAM per training job).
+# Variants are processed one at a time so different-sized models never share
+# a GPU; this makes VRAM budgeting predictable.
 YOLOLITE_VARIANTS = {
-    "yololite-n": ("v2_models", "yololite_n.yaml"),
-    "yololite-s": ("v2_models", "yololite_s.yaml"),
-    "yololite-m": ("v2_models", "yololite_m.yaml"),
-    "yololite-l": ("v2_models", "yololite_l.yaml"),
-    "yololite-xl": ("models", "yololite_xl.yaml"),
-    "yololite-edge-n": ("models", "edge_n.yaml"),
-    "yololite-edge-s": ("models", "edge_s.yaml"),
-    "yololite-edge-m": ("models", "edge_m.yaml"),
-    "yololite-edge-l": ("models", "edge_l.yaml"),
-    "yololite-edge-xl": ("models", "edge_xl.yaml"),
+    "yololite-n":       ("v2_models", "yololite_n.yaml",  8),   # ~10 GB/job
+    "yololite-edge-n":  ("models",    "edge_n.yaml",      8),   # ~10 GB/job
+    "yololite-s":       ("v2_models", "yololite_s.yaml",  6),   # ~13 GB/job
+    "yololite-edge-s":  ("models",    "edge_s.yaml",      6),   # ~13 GB/job
+    "yololite-m":       ("v2_models", "yololite_m.yaml",  5),   # ~16 GB/job
+    "yololite-edge-m":  ("models",    "edge_m.yaml",      5),   # ~16 GB/job
+    "yololite-l":       ("v2_models", "yololite_l.yaml",  4),   # ~20 GB/job
+    "yololite-edge-l":  ("models",    "edge_l.yaml",      4),   # ~20 GB/job
+    "yololite-xl":      ("models",    "yololite_xl.yaml", 2),   # ~28 GB/job
+    "yololite-edge-xl": ("models",    "edge_xl.yaml",     2),   # ~28 GB/job
 }
 
 
@@ -98,6 +105,7 @@ def run_single_training(
     variant_name: str,
     dataset_dir: str,
     dataset_name: str,
+    device: str = "0",
 ) -> dict:
     """Train one yololite variant on one dataset, then evaluate on test split."""
     from yololite.scripts.args.build_args import load_configs
@@ -105,7 +113,7 @@ def run_single_training(
     from yololite.tools.evaluate import evaluate_on_folder
 
     configs_root = _pkg_files("yololite").joinpath("configs")
-    subdir, yaml_file = YOLOLITE_VARIANTS[variant_name]
+    subdir, yaml_file, _jobs_per_gpu = YOLOLITE_VARIANTS[variant_name]
     model_yaml = str(configs_root / subdir / yaml_file)
     train_yaml = str(configs_root / "train" / "standard_train.yaml")
     data_yaml = _find_data_yaml(dataset_dir)
@@ -129,7 +137,7 @@ def run_single_training(
     config["training"]["save_every"] = EPOCHS + 1  # no periodic saves
     config["training"]["save_by"] = "AP"
     config["training"]["num_workers"] = 4
-    config["training"]["device"] = "0"
+    config["training"]["device"] = device
 
     t0 = time.time()
     train_result = run_training(config)
@@ -146,7 +154,7 @@ def run_single_training(
             weights=best_ckpt,
             test_folder=test_folder,
             batch_size=BATCH_SIZE,
-            device="0",
+            device=device,
             max_dets=MAX_DETS,
             log_dir=eval_log_dir,
         )
@@ -168,9 +176,9 @@ def run_single_training(
 
 def _worker(args: tuple) -> dict:
     """Top-level worker function for ProcessPoolExecutor (must be picklable)."""
-    variant_name, dataset_dir, dataset_name = args
+    variant_name, dataset_dir, dataset_name, device = args
     try:
-        return run_single_training(variant_name, dataset_dir, dataset_name)
+        return run_single_training(variant_name, dataset_dir, dataset_name, device)
     except Exception as e:
         traceback.print_exc()
         return {
@@ -195,19 +203,13 @@ def main():
         print("ERROR: No datasets found after download. Check ROBOFLOW_API_KEY.")
         sys.exit(1)
 
-    # 2. Build the job matrix: (variant, dataset_dir, dataset_name)
-    jobs = []
-    for ddir in dataset_dirs:
-        dname = Path(ddir).name
-        for variant in YOLOLITE_VARIANTS:
-            jobs.append((variant, ddir, dname))
+    total = len(dataset_dirs) * len(YOLOLITE_VARIANTS)
 
-    total = len(jobs)
     print(f"\n{'='*70}")
     print(f"Benchmark matrix: {len(dataset_dirs)} datasets × "
           f"{len(YOLOLITE_VARIANTS)} variants = {total} training runs")
     print(f"Epochs: {EPOCHS}  |  Batch size: {BATCH_SIZE}  |  "
-          f"Concurrent jobs: {MAX_CONCURRENT_JOBS}")
+          f"GPUs: {NUM_GPUS}")
     print(f"{'='*70}\n")
 
     # Load any existing partial results so we can skip completed runs
@@ -221,15 +223,34 @@ def main():
         print(f"Resuming: {len(completed)} runs already completed, "
               f"{total - len(completed)} remaining.\n")
 
-    remaining_jobs = [j for j in jobs if (j[2], j[0]) not in completed]
+    done_count = len(completed)
 
-    if not remaining_jobs:
-        print("All runs already completed!")
-    else:
-        # 3. Run training jobs concurrently
-        with ProcessPoolExecutor(max_workers=MAX_CONCURRENT_JOBS) as pool:
-            futures = {pool.submit(_worker, job): job for job in remaining_jobs}
-            done_count = len(completed)
+    # 2. Process one variant at a time so different-sized models never share
+    #    a GPU.  Each variant gets its own pool sized to its VRAM footprint.
+    for variant, (_subdir, _yaml, jobs_per_gpu) in YOLOLITE_VARIANTS.items():
+        max_concurrent = NUM_GPUS * jobs_per_gpu
+
+        # Build jobs for this variant: (variant, dataset_dir, dataset_name, device)
+        variant_jobs = []
+        for i, ddir in enumerate(dataset_dirs):
+            dname = Path(ddir).name
+            if (dname, variant) in completed:
+                continue
+            device = str(i % NUM_GPUS)
+            variant_jobs.append((variant, ddir, dname, device))
+
+        if not variant_jobs:
+            print(f"[{variant}] all {len(dataset_dirs)} datasets already done, skipping.")
+            continue
+
+        print(f"\n{'─'*70}")
+        print(f"[{variant}] {len(variant_jobs)} datasets remaining  |  "
+              f"jobs_per_gpu={jobs_per_gpu}  |  max_concurrent={max_concurrent}")
+        print(f"{'─'*70}")
+
+        # 3. Run training jobs for this variant
+        with ProcessPoolExecutor(max_workers=max_concurrent) as pool:
+            futures = {pool.submit(_worker, job): job for job in variant_jobs}
 
             for future in as_completed(futures):
                 result = future.result()
@@ -266,7 +287,7 @@ def main():
         summary = (
             df.groupby("variant")[["mAP50", "mAP50_95", "precision", "recall"]]
             .mean()
-            .sort_values("mAP50_95", ascending=False)
+            .sort_values("mAP50", ascending=False)
         )
         summary_path = os.path.join(RESULTS_DIR, "summary_by_variant.csv")
         summary.to_csv(summary_path)

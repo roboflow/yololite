@@ -3,11 +3,7 @@ import os, sys
 from pathlib import Path
 import torch
 
-
-ROOT = os.getcwd()
-if str(ROOT) not in sys.path:
-    sys.path.append(str(ROOT))
-from tools.infer import load_model_names_imgsize_from_ckpt
+from yololite.tools.infer import load_model_names_imgsize_from_ckpt
 from torch.utils.data import DataLoader
 
 from yololite.scripts.data.dataset import YoloDataset
