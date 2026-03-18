@@ -214,3 +214,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# RF100-VL benchmarking artifacts
+rf100vl_benchmark_results/
+rf100vl_datasets/
