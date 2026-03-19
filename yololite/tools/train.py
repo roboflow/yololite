@@ -452,6 +452,8 @@ def run_training(config: dict, callbacks=None) -> dict:
         for i, (imgs, targets) in train_pbar:
             if callbacks is not None and hasattr(callbacks, 'should_stop') and callbacks.should_stop():
                 break
+            if callbacks is not None and hasattr(callbacks, 'on_train_batch_start'):
+                callbacks.on_train_batch_start(epoch)
 
             imgs = torch.stack(imgs).to(DEVICE, non_blocking=True)
 
