@@ -20,36 +20,40 @@ from importlib.resources import files as _pkg_files
 from pathlib import Path
 
 import pandas as pd
+import torch
 
 # ── Configuration ────────────────────────────────────────────────────────────
 DATASETS_DIR = "./rf100vl_datasets"
 RESULTS_DIR = "./rf100vl_benchmark_results"
 RESULTS_CSV = os.path.join(RESULTS_DIR, "benchmark_results.csv")
 DATASETS_FORMAT = "yolov8"
+IMG_SIZE = 640
+
+# rf100-vl standard benchmarking parameters
 EPOCHS = 100
 BATCH_SIZE = 16
-IMG_SIZE = 640
 MAX_DETS = 500  # max detections per image for COCO eval on test split
 
 # ── GPU concurrency ───────────────────────────────────────────────────────────
-NUM_GPUS = 8  # number of GPUs available (A100-80GB)
+NUM_GPUS = torch.cuda.device_count()
+NUM_CPUS = os.cpu_count() or 120
 
 # All yololite variants supported in roboflow-train.
 # Each entry: (config_subdir, config_yaml, jobs_per_gpu).
-# jobs_per_gpu = floor(80 GB / estimated VRAM per training job).
+# jobs_per_gpu = floor(80 GB / estimated peak VRAM per training job) - 1.
 # Variants are processed one at a time so different-sized models never share
 # a GPU; this makes VRAM budgeting predictable.
 YOLOLITE_VARIANTS = {
-    "yololite-n":       ("v2_models", "yololite_n.yaml",  8),   # ~10 GB/job
-    "yololite-edge-n":  ("models",    "edge_n.yaml",      8),   # ~10 GB/job
-    "yololite-s":       ("v2_models", "yololite_s.yaml",  6),   # ~13 GB/job
-    "yololite-edge-s":  ("models",    "edge_s.yaml",      6),   # ~13 GB/job
-    "yololite-m":       ("v2_models", "yololite_m.yaml",  5),   # ~16 GB/job
-    "yololite-edge-m":  ("models",    "edge_m.yaml",      5),   # ~16 GB/job
-    "yololite-l":       ("v2_models", "yololite_l.yaml",  4),   # ~20 GB/job
-    "yololite-edge-l":  ("models",    "edge_l.yaml",      4),   # ~20 GB/job
-    "yololite-xl":      ("models",    "yololite_xl.yaml", 2),   # ~28 GB/job
-    "yololite-edge-xl": ("models",    "edge_xl.yaml",     2),   # ~28 GB/job
+    "yololite-n":       ("v2_models", "yololite_n.yaml",  6),   # ~11 GB peak
+    "yololite-edge-n":  ("models",    "edge_n.yaml",      6),   # ~11 GB peak
+    "yololite-s":       ("v2_models", "yololite_s.yaml",  4),   # ~14 GB peak
+    "yololite-edge-s":  ("models",    "edge_s.yaml",      4),   # ~14 GB peak
+    "yololite-m":       ("v2_models", "yololite_m.yaml",  4),   # ~16 GB peak
+    "yololite-edge-m":  ("models",    "edge_m.yaml",      4),   # ~16 GB peak
+    "yololite-l":       ("v2_models", "yololite_l.yaml",  2),   # ~30 GB peak
+    "yololite-edge-l":  ("models",    "edge_l.yaml",      2),   # ~30 GB peak
+    "yololite-xl":      ("models",    "yololite_xl.yaml", 1),   # ~52 GB peak
+    "yololite-edge-xl": ("models",    "edge_xl.yaml",     1),   # ~52 GB peak
 }
 
 
@@ -106,8 +110,16 @@ def run_single_training(
     dataset_dir: str,
     dataset_name: str,
     device: str = "0",
+    max_concurrent: int = 1,
 ) -> dict:
     """Train one yololite variant on one dataset, then evaluate on test split."""
+    import torch
+
+    # Cap PyTorch intra-op thread pool to avoid oversubscription.
+    # set_num_interop_threads cannot be called after fork, so we rely on
+    # OMP_NUM_THREADS / MKL_NUM_THREADS env vars set in _worker() instead.
+    torch.set_num_threads(max(1, NUM_CPUS // max_concurrent))
+
     from yololite.scripts.args.build_args import load_configs
     from yololite.tools.train import run_training
     from yololite.tools.evaluate import evaluate_on_folder
@@ -136,7 +148,7 @@ def run_single_training(
     config["training"]["img_size"] = IMG_SIZE
     config["training"]["save_every"] = EPOCHS + 1  # no periodic saves
     config["training"]["save_by"] = "AP"
-    config["training"]["num_workers"] = 4
+    config["training"]["num_workers"] = max(1, NUM_CPUS // max_concurrent)
     config["training"]["device"] = device
 
     t0 = time.time()
@@ -176,9 +188,13 @@ def run_single_training(
 
 def _worker(args: tuple) -> dict:
     """Top-level worker function for ProcessPoolExecutor (must be picklable)."""
-    variant_name, dataset_dir, dataset_name, device = args
+    variant_name, dataset_dir, dataset_name, device, max_concurrent = args
+    # Set thread limits before torch is imported in this process
+    threads_per_job = str(max(1, NUM_CPUS // max_concurrent))
+    os.environ["OMP_NUM_THREADS"] = threads_per_job
+    os.environ["MKL_NUM_THREADS"] = threads_per_job
     try:
-        return run_single_training(variant_name, dataset_dir, dataset_name, device)
+        return run_single_training(variant_name, dataset_dir, dataset_name, device, max_concurrent)
     except Exception as e:
         traceback.print_exc()
         return {
@@ -237,7 +253,7 @@ def main():
             if (dname, variant) in completed:
                 continue
             device = str(i % NUM_GPUS)
-            variant_jobs.append((variant, ddir, dname, device))
+            variant_jobs.append((variant, ddir, dname, device, max_concurrent))
 
         if not variant_jobs:
             print(f"[{variant}] all {len(dataset_dirs)} datasets already done, skipping.")
