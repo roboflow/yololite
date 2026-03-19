@@ -35,7 +35,6 @@ def evaluate_on_folder(
     test_folder: str,
     batch_size: int = 8,
     device: str = "0",
-    max_dets: int = 100,
     no_letterbox: bool = False,
     log_dir: str | None = None,
 ) -> dict:
@@ -75,7 +74,7 @@ def evaluate_on_folder(
     return evaluate_model(
         model=model, val_loader=test_loader, log_dir=log_dir,
         NUM_CLASSES=len(names), DEVICE=dev, IMG_SIZE=meta_img_size,
-        batch_size=batch_size, class_names=names, max_dets=max_dets,
+        batch_size=batch_size, class_names=names,
     )
 
 
@@ -87,7 +86,6 @@ def main():
     ap.add_argument("--device", default="0")
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--no_letterbox", action="store_true", help="Use pure resize instead of letterbox")
-    ap.add_argument("--max_dets", type=int, default=100, help="Max detections per image for COCO eval (default 100)")
     args = ap.parse_args()
 
     evaluate_on_folder(
@@ -95,7 +93,6 @@ def main():
         test_folder=args.test_folder,
         batch_size=args.batch_size,
         device=args.device,
-        max_dets=args.max_dets,
         no_letterbox=args.no_letterbox,
     )
     

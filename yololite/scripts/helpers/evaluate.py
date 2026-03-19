@@ -416,7 +416,7 @@ def make_summary_image(
         img.save(save_path)
     return img
 
-def evaluate_model(model, val_loader, log_dir, NUM_CLASSES, DEVICE, IMG_SIZE, batch_size, class_names, max_dets=100):
+def evaluate_model(model, val_loader, log_dir, NUM_CLASSES, DEVICE, IMG_SIZE, batch_size, class_names):
     
     # -------------------- EVAL --------------------
     use_amp = True if torch.cuda.is_available() else False
@@ -497,7 +497,7 @@ def evaluate_model(model, val_loader, log_dir, NUM_CLASSES, DEVICE, IMG_SIZE, ba
 
     # COCOeval
     coco_stats = _coco_eval_from_lists(
-        coco_images, coco_anns, coco_dets, iouType="bbox", num_classes=NUM_CLASSES, max_dets=max_dets
+        coco_images, coco_anns, coco_dets, iouType="bbox", num_classes=NUM_CLASSES
     )
     
     # Precision/Recall/F1-curves

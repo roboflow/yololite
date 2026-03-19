@@ -32,7 +32,14 @@ IMG_SIZE = 640
 # rf100-vl standard benchmarking parameters
 EPOCHS = 100
 BATCH_SIZE = 16
-MAX_DETS = 500  # max detections per image for COCO eval on test split
+# NOTE: COCO eval uses the default maxDets=100.  We cannot raise it (e.g. to
+# 500) because pycocotools' _summarize() hardcodes maxDets=100 as the default
+# parameter for AP@0.50:0.95 (stats[0]).  Changing E.params.maxDets to include
+# a value other than [1, 10, 100] causes stats[0] to look up maxDets=100 in
+# the list, and if the list is [1, 10, 500] it returns -1 (not found).  Even
+# keeping 100 in a 4-element list [1, 10, 100, 500] shifts which index
+# _summarize references for AR stats.  A proper fix would require patching
+# pycocotools' summarize() method.
 
 # ── GPU concurrency ───────────────────────────────────────────────────────────
 NUM_GPUS = torch.cuda.device_count()
@@ -155,7 +162,7 @@ def run_single_training(
     train_result = run_training(config)
     elapsed = time.time() - t0
 
-    # Evaluate the best checkpoint on the test split with max_dets=500
+    # Evaluate the best checkpoint on the test split
     best_ckpt = train_result["best_checkpoint"]
     test_folder = _find_test_folder(dataset_dir)
 
@@ -167,12 +174,12 @@ def run_single_training(
             test_folder=test_folder,
             batch_size=BATCH_SIZE,
             device=device,
-            max_dets=MAX_DETS,
             log_dir=eval_log_dir,
         )
     else:
-        # Fall back to training's val-split metrics if no test split exists
-        test_metrics = train_result.get("best_metrics", {})
+        raise FileNotFoundError(
+            f"No test split found in {dataset_dir} — benchmark requires a test split"
+        )
 
     return {
         "dataset": dataset_name,
