@@ -205,6 +205,7 @@ def run_single_training(
             batch_size=BATCH_SIZE,
             device=device,
             log_dir=eval_log_dir,
+            num_workers=max(1, NUM_CPUS // max_concurrent),
         )
         eval_elapsed = time.time() - t1
     else:
