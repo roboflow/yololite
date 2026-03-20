@@ -179,7 +179,7 @@ def run_single_training(
 
     t0 = time.time()
     train_result = run_training(config)
-    elapsed = time.time() - t0
+    train_elapsed = time.time() - t0
 
     # Evaluate the best checkpoint on the test split
     best_ckpt = train_result["best_checkpoint"]
@@ -188,6 +188,7 @@ def run_single_training(
     if test_folder is not None:
         eval_log_dir = os.path.join(log_dir, "test_eval")
         os.makedirs(eval_log_dir, exist_ok=True)
+        t1 = time.time()
         test_metrics = evaluate_on_folder(
             weights=best_ckpt,
             test_folder=test_folder,
@@ -195,6 +196,7 @@ def run_single_training(
             device=device,
             log_dir=eval_log_dir,
         )
+        eval_elapsed = time.time() - t1
     else:
         raise FileNotFoundError(
             f"No test split found in {dataset_dir} — benchmark requires a test split"
@@ -208,7 +210,8 @@ def run_single_training(
         "precision": test_metrics.get("precision", 0.0),
         "recall": test_metrics.get("recall", 0.0),
         "epochs_completed": train_result.get("epochs_completed", 0),
-        "elapsed_s": round(elapsed, 1),
+        "train_s": round(train_elapsed, 1),
+        "eval_s": round(eval_elapsed, 1),
     }
 
 
@@ -232,7 +235,8 @@ def _worker(args: tuple) -> dict:
             "mAP50": None,
             "mAP50_95": None,
             "epochs_completed": 0,
-            "elapsed_s": 0,
+            "train_s": 0,
+            "eval_s": 0,
             "error": str(e),
         }
     finally:
@@ -329,7 +333,7 @@ def main():
                     f"[{done_count}/{total}] {result['dataset']} / "
                     f"{result['variant']}  —  "
                     f"mAP50={result['mAP50']}  mAP50:95={result['mAP50_95']}  "
-                    f"({result['elapsed_s']}s)  [{status}]"
+                    f"(train={result['train_s']}s  eval={result['eval_s']}s)  [{status}]"
                 )
 
                 # Save per-variant CSV incrementally
