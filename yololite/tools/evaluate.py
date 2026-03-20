@@ -37,6 +37,7 @@ def evaluate_on_folder(
     device: str = "0",
     no_letterbox: bool = False,
     log_dir: str | None = None,
+    num_workers: int = 0,
 ) -> dict:
     """Evaluate a checkpoint on a folder with images/ and labels/ subdirectories.
 
@@ -65,7 +66,7 @@ def evaluate_on_folder(
         test_ds,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0,
+        num_workers=num_workers,
         pin_memory=True,
         collate_fn=yolo_collate,
         drop_last=False,
