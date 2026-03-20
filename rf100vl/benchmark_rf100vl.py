@@ -69,24 +69,18 @@ YOLOLITE_VARIANTS = {
 
 # ── GCS upload ────────────────────────────────────────────────────────────────
 
-def upload_to_gcs(*paths: str) -> None:
-    """Upload specific files to the GCS bucket, mirroring their relative path
-    under RESULTS_DIR.  Failures are logged but never abort the benchmark."""
-    for path in paths:
-        if not os.path.isfile(path):
-            continue
-        rel = os.path.relpath(path, RESULTS_DIR)
-        dest = f"{GCS_BUCKET}/{rel}"
-        try:
-            subprocess.run(
-                ["gcloud", "storage", "cp", path, dest],
-                check=True, capture_output=True, text=True,
-            )
-        except FileNotFoundError:
-            print("WARNING: gcloud CLI not found — skipping GCS upload")
-            return
-        except subprocess.CalledProcessError as e:
-            print(f"WARNING: GCS upload failed for {rel}: {e.stderr.strip()}")
+def sync_results_to_gcs() -> None:
+    """Rsync the entire RESULTS_DIR to GCS.
+    Failures are logged but never abort the benchmark."""
+    try:
+        subprocess.run(
+            ["gcloud", "storage", "rsync", "-r", RESULTS_DIR, GCS_BUCKET],
+            check=True, capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        print("WARNING: gcloud CLI not found — skipping GCS sync")
+    except subprocess.CalledProcessError as e:
+        print(f"WARNING: GCS sync failed: {e.stderr.strip()}")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -340,7 +334,9 @@ def main():
 
                 # Save per-variant CSV incrementally
                 pd.DataFrame(variant_rows[variant]).to_csv(variant_csv, index=False)
-                upload_to_gcs(variant_csv)
+
+        # Sync entire results folder to GCS after each variant completes
+        sync_results_to_gcs()
 
     manager.shutdown()
 
@@ -348,11 +344,6 @@ def main():
     all_rows = [r for rows in variant_rows.values() for r in rows]
     df = pd.DataFrame(all_rows)
     df.to_csv(RESULTS_CSV, index=False)
-
-    # Collect all files to upload at the end
-    gcs_files = [RESULTS_CSV]
-    gcs_files.extend(_variant_csv(v) for v in YOLOLITE_VARIANTS
-                     if os.path.isfile(_variant_csv(v)))
 
     # Pivot tables for quick comparison
     if not df.empty and "error" not in df.columns or not df.get("error", pd.Series()).any():
@@ -362,7 +353,6 @@ def main():
             )
             pivot_path = os.path.join(RESULTS_DIR, f"pivot_{metric}.csv")
             pivot.to_csv(pivot_path)
-            gcs_files.append(pivot_path)
             print(f"\nPivot table saved: {pivot_path}")
 
         # Mean across datasets per variant
@@ -373,11 +363,10 @@ def main():
         )
         summary_path = os.path.join(RESULTS_DIR, "summary_by_variant.csv")
         summary.to_csv(summary_path)
-        gcs_files.append(summary_path)
         print(f"Summary saved:     {summary_path}")
         print(f"\n{summary.to_string()}")
 
-    upload_to_gcs(*gcs_files)
+    sync_results_to_gcs()
 
     print(f"\nFull results:      {RESULTS_CSV}")
     print(f"GCS results:       {GCS_BUCKET}/")
