@@ -18,6 +18,7 @@ import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from importlib.resources import files as _pkg_files
+from multiprocessing import Manager
 from pathlib import Path
 
 import pandas as pd
@@ -26,7 +27,7 @@ import torch
 # ── Configuration ────────────────────────────────────────────────────────────
 DATASETS_DIR = "/dev/shm/rf100vl_datasets"
 RESULTS_DIR = "/dev/shm/rf100vl_benchmark_results"
-RESULTS_CSV = os.path.join(RESULTS_DIR, "benchmark_results.csv")
+RESULTS_CSV = os.path.join(RESULTS_DIR, "benchmark_results.csv")  # combined final
 GCS_BUCKET = "gs://rf-detr-rf100-vl/yololite-benchmark"
 DATASETS_FORMAT = "yolov8"
 IMG_SIZE = 640
@@ -219,11 +220,14 @@ def run_single_training(
 
 def _worker(args: tuple) -> dict:
     """Top-level worker function for ProcessPoolExecutor (must be picklable)."""
-    variant_name, dataset_dir, dataset_name, device, max_concurrent = args
+    variant_name, dataset_dir, dataset_name, gpu_slots, max_concurrent = args
     # Set thread limits before torch is imported in this process
     threads_per_job = str(max(1, NUM_CPUS // max_concurrent))
     os.environ["OMP_NUM_THREADS"] = threads_per_job
     os.environ["MKL_NUM_THREADS"] = threads_per_job
+    # Acquire a GPU slot — blocks until one is free, guaranteeing at most
+    # jobs_per_gpu concurrent jobs on each device.
+    device = gpu_slots.get()
     try:
         return run_single_training(variant_name, dataset_dir, dataset_name, device, max_concurrent)
     except Exception as e:
@@ -237,9 +241,16 @@ def _worker(args: tuple) -> dict:
             "elapsed_s": 0,
             "error": str(e),
         }
+    finally:
+        gpu_slots.put(device)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
+
+def _variant_csv(variant: str) -> str:
+    """Return the per-variant CSV path."""
+    return os.path.join(RESULTS_DIR, f"results_{variant}.csv")
+
 
 def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -259,14 +270,19 @@ def main():
           f"GPUs: {NUM_GPUS}")
     print(f"{'='*70}\n")
 
-    # Load any existing partial results so we can skip completed runs
+    # Load any existing partial results from per-variant CSVs so we can
+    # resume.  Each variant has its own CSV: results_<variant>.csv
     completed = set()
-    rows = []
-    if os.path.isfile(RESULTS_CSV):
-        existing = pd.read_csv(RESULTS_CSV)
-        rows = existing.to_dict("records")
-        for r in rows:
-            completed.add((r["dataset"], r["variant"]))
+    variant_rows: dict[str, list[dict]] = {v: [] for v in YOLOLITE_VARIANTS}
+    for variant in YOLOLITE_VARIANTS:
+        csv_path = _variant_csv(variant)
+        if os.path.isfile(csv_path):
+            existing = pd.read_csv(csv_path)
+            variant_rows[variant] = existing.to_dict("records")
+            for r in variant_rows[variant]:
+                completed.add((r["dataset"], r["variant"]))
+
+    if completed:
         print(f"Resuming: {len(completed)} runs already completed, "
               f"{total - len(completed)} remaining.\n")
 
@@ -274,17 +290,25 @@ def main():
 
     # 2. Process one variant at a time so different-sized models never share
     #    a GPU.  Each variant gets its own pool sized to its VRAM footprint.
+    manager = Manager()
     for variant, (_subdir, _yaml, jobs_per_gpu) in YOLOLITE_VARIANTS.items():
         max_concurrent = NUM_GPUS * jobs_per_gpu
 
-        # Build jobs for this variant: (variant, dataset_dir, dataset_name, device)
+        # Build a queue of GPU slots: each GPU ID appears jobs_per_gpu times.
+        # Workers acquire a slot before training and release it when done,
+        # guaranteeing at most jobs_per_gpu concurrent jobs per device.
+        gpu_slots = manager.Queue()
+        for gpu_id in range(NUM_GPUS):
+            for _ in range(jobs_per_gpu):
+                gpu_slots.put(str(gpu_id))
+
+        # Build jobs for this variant
         variant_jobs = []
-        for i, ddir in enumerate(dataset_dirs):
+        for ddir in dataset_dirs:
             dname = Path(ddir).name
             if (dname, variant) in completed:
                 continue
-            device = str(i % NUM_GPUS)
-            variant_jobs.append((variant, ddir, dname, device, max_concurrent))
+            variant_jobs.append((variant, ddir, dname, gpu_slots, max_concurrent))
 
         if not variant_jobs:
             print(f"[{variant}] all {len(dataset_dirs)} datasets already done, skipping.")
@@ -295,13 +319,15 @@ def main():
               f"jobs_per_gpu={jobs_per_gpu}  |  max_concurrent={max_concurrent}")
         print(f"{'─'*70}")
 
+        variant_csv = _variant_csv(variant)
+
         # 3. Run training jobs for this variant
         with ProcessPoolExecutor(max_workers=max_concurrent) as pool:
             futures = {pool.submit(_worker, job): job for job in variant_jobs}
 
             for future in as_completed(futures):
                 result = future.result()
-                rows.append(result)
+                variant_rows[variant].append(result)
                 done_count += 1
 
                 status = "OK" if result.get("error") is None else f"FAIL: {result['error']}"
@@ -312,18 +338,23 @@ def main():
                     f"({result['elapsed_s']}s)  [{status}]"
                 )
 
-                # Save incrementally after each run
-                df = pd.DataFrame(rows)
-                df.to_csv(RESULTS_CSV, index=False)
-                upload_to_gcs(RESULTS_CSV)
+                # Save per-variant CSV incrementally
+                pd.DataFrame(variant_rows[variant]).to_csv(variant_csv, index=False)
+                upload_to_gcs(variant_csv)
 
-    # 4. Build and save the final results table
-    df = pd.DataFrame(rows)
+    manager.shutdown()
+
+    # 4. Build combined results from all per-variant CSVs
+    all_rows = [r for rows in variant_rows.values() for r in rows]
+    df = pd.DataFrame(all_rows)
     df.to_csv(RESULTS_CSV, index=False)
-    upload_to_gcs(RESULTS_CSV)
+
+    # Collect all files to upload at the end
+    gcs_files = [RESULTS_CSV]
+    gcs_files.extend(_variant_csv(v) for v in YOLOLITE_VARIANTS
+                     if os.path.isfile(_variant_csv(v)))
 
     # Pivot tables for quick comparison
-    gcs_files = [RESULTS_CSV]
     if not df.empty and "error" not in df.columns or not df.get("error", pd.Series()).any():
         for metric in ["mAP50", "mAP50_95", "precision", "recall"]:
             pivot = df.pivot_table(
