@@ -11,6 +11,7 @@ VRAM footprint), so small models get higher parallelism than large ones.
 Adjust NUM_GPUS and per-variant jobs_per_gpu to match your hardware.
 """
 
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -18,11 +19,15 @@ import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from importlib.resources import files as _pkg_files
-from multiprocessing import Manager
 from pathlib import Path
 
 import pandas as pd
-import torch
+
+# NOTE: torch is intentionally NOT imported at module level.  Spawned worker
+# processes re-import this module, and any module-level torch import would
+# initialize CUDA before the pool initializer can set CUDA_VISIBLE_DEVICES.
+# Use _get_num_gpus() in the main process; workers import torch after the
+# initializer has restricted them to a single GPU.
 
 # ── Configuration ────────────────────────────────────────────────────────────
 DATASETS_DIR = "/dev/shm/rf100vl_datasets"
@@ -45,8 +50,13 @@ BATCH_SIZE = 16
 # pycocotools' summarize() method.
 
 # ── GPU concurrency ───────────────────────────────────────────────────────────
-NUM_GPUS = torch.cuda.device_count()
 NUM_CPUS = os.cpu_count() or 120
+_SPAWN_CTX = multiprocessing.get_context("spawn")
+
+
+def _get_num_gpus() -> int:
+    import torch
+    return torch.cuda.device_count()
 
 # All yololite variants supported in roboflow-train.
 # Each entry: (config_subdir, config_yaml, jobs_per_gpu).
@@ -215,18 +225,21 @@ def run_single_training(
     }
 
 
+def _pool_initializer(gpu_id: int, max_concurrent: int) -> None:
+    """Called once per worker process before any task runs.  Sets
+    CUDA_VISIBLE_DEVICES so the subsequent torch import only sees one GPU."""
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    threads = str(max(1, NUM_CPUS // max_concurrent))
+    os.environ["OMP_NUM_THREADS"] = threads
+    os.environ["MKL_NUM_THREADS"] = threads
+
+
 def _worker(args: tuple) -> dict:
     """Top-level worker function for ProcessPoolExecutor (must be picklable)."""
-    variant_name, dataset_dir, dataset_name, gpu_slots, max_concurrent = args
-    # Set thread limits before torch is imported in this process
-    threads_per_job = str(max(1, NUM_CPUS // max_concurrent))
-    os.environ["OMP_NUM_THREADS"] = threads_per_job
-    os.environ["MKL_NUM_THREADS"] = threads_per_job
-    # Acquire a GPU slot — blocks until one is free, guaranteeing at most
-    # jobs_per_gpu concurrent jobs on each device.
-    device = gpu_slots.get()
+    variant_name, dataset_dir, dataset_name, max_concurrent = args
     try:
-        return run_single_training(variant_name, dataset_dir, dataset_name, device, max_concurrent)
+        # device="0" because CUDA_VISIBLE_DEVICES remaps the assigned GPU
+        return run_single_training(variant_name, dataset_dir, dataset_name, "0", max_concurrent)
     except Exception as e:
         traceback.print_exc()
         return {
@@ -239,8 +252,6 @@ def _worker(args: tuple) -> dict:
             "eval_s": 0,
             "error": str(e),
         }
-    finally:
-        gpu_slots.put(device)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -264,8 +275,10 @@ def main():
     print(f"\n{'='*70}")
     print(f"Benchmark matrix: {len(dataset_dirs)} datasets × "
           f"{len(YOLOLITE_VARIANTS)} variants = {total} training runs")
+    num_gpus = _get_num_gpus()
+
     print(f"Epochs: {EPOCHS}  |  Batch size: {BATCH_SIZE}  |  "
-          f"GPUs: {NUM_GPUS}")
+          f"GPUs: {num_gpus}")
     print(f"{'='*70}\n")
 
     # Load any existing partial results from per-variant CSVs so we can
@@ -288,25 +301,18 @@ def main():
 
     # 2. Process one variant at a time so different-sized models never share
     #    a GPU.  Each variant gets its own pool sized to its VRAM footprint.
-    manager = Manager()
+    #    Per-GPU pools with CUDA_VISIBLE_DEVICES set via initializer ensure
+    #    each worker only ever sees one GPU — no stray contexts on GPU 0.
     for variant, (_subdir, _yaml, jobs_per_gpu) in YOLOLITE_VARIANTS.items():
-        max_concurrent = NUM_GPUS * jobs_per_gpu
+        max_concurrent = num_gpus * jobs_per_gpu
 
-        # Build a queue of GPU slots: each GPU ID appears jobs_per_gpu times.
-        # Workers acquire a slot before training and release it when done,
-        # guaranteeing at most jobs_per_gpu concurrent jobs per device.
-        gpu_slots = manager.Queue()
-        for gpu_id in range(NUM_GPUS):
-            for _ in range(jobs_per_gpu):
-                gpu_slots.put(str(gpu_id))
-
-        # Build jobs for this variant
+        # Build jobs for this variant (no device — pools handle GPU assignment)
         variant_jobs = []
         for ddir in dataset_dirs:
             dname = Path(ddir).name
             if (dname, variant) in completed:
                 continue
-            variant_jobs.append((variant, ddir, dname, gpu_slots, max_concurrent))
+            variant_jobs.append((variant, ddir, dname, max_concurrent))
 
         if not variant_jobs:
             print(f"[{variant}] all {len(dataset_dirs)} datasets already done, skipping.")
@@ -319,9 +325,28 @@ def main():
 
         variant_csv = _variant_csv(variant)
 
-        # 3. Run training jobs for this variant
-        with ProcessPoolExecutor(max_workers=max_concurrent) as pool:
-            futures = {pool.submit(_worker, job): job for job in variant_jobs}
+        # 3. Distribute jobs round-robin across GPUs, one pool per GPU.
+        #    Each pool's initializer sets CUDA_VISIBLE_DEVICES before any
+        #    task runs.  Because torch is NOT imported at module level,
+        #    CUDA is not yet initialized when the initializer executes.
+        gpu_jobs: list[list[tuple]] = [[] for _ in range(num_gpus)]
+        for i, job in enumerate(variant_jobs):
+            gpu_jobs[i % num_gpus].append(job)
+
+        pools = []
+        for gpu_id in range(num_gpus):
+            pools.append(ProcessPoolExecutor(
+                max_workers=jobs_per_gpu,
+                mp_context=_SPAWN_CTX,
+                initializer=_pool_initializer,
+                initargs=(gpu_id, max_concurrent),
+            ))
+
+        try:
+            futures = {}
+            for gpu_id, jobs in enumerate(gpu_jobs):
+                for job in jobs:
+                    futures[pools[gpu_id].submit(_worker, job)] = job
 
             for future in as_completed(futures):
                 result = future.result()
@@ -338,11 +363,15 @@ def main():
 
                 # Save per-variant CSV incrementally
                 pd.DataFrame(variant_rows[variant]).to_csv(variant_csv, index=False)
+        finally:
+            # Shut down pools one at a time to avoid semaphore cleanup races
+            # (Python 3.10 bug where concurrent finalizers try to sem_unlink
+            # the same named semaphore twice).
+            for pool in pools:
+                pool.shutdown(wait=True)
 
         # Sync entire results folder to GCS after each variant completes
         sync_results_to_gcs()
-
-    manager.shutdown()
 
     # 4. Build combined results from all per-variant CSVs
     all_rows = [r for rows in variant_rows.values() for r in rows]
