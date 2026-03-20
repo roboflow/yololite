@@ -12,6 +12,7 @@ Adjust NUM_GPUS and per-variant jobs_per_gpu to match your hardware.
 """
 
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -23,9 +24,10 @@ import pandas as pd
 import torch
 
 # ── Configuration ────────────────────────────────────────────────────────────
-DATASETS_DIR = "./rf100vl_datasets"
-RESULTS_DIR = "./rf100vl_benchmark_results"
+DATASETS_DIR = "/dev/shm/rf100vl_datasets"
+RESULTS_DIR = "/dev/shm/rf100vl_benchmark_results"
 RESULTS_CSV = os.path.join(RESULTS_DIR, "benchmark_results.csv")
+GCS_BUCKET = "gs://rf-detr-rf100-vl/yololite-benchmark"
 DATASETS_FORMAT = "yolov8"
 IMG_SIZE = 640
 
@@ -51,8 +53,8 @@ NUM_CPUS = os.cpu_count() or 120
 # Variants are processed one at a time so different-sized models never share
 # a GPU; this makes VRAM budgeting predictable.
 YOLOLITE_VARIANTS = {
-    "yololite-n":       ("v2_models", "yololite_n.yaml",  6),   # ~11 GB peak
-    "yololite-edge-n":  ("models",    "edge_n.yaml",      6),   # ~11 GB peak
+    "yololite-n":       ("v2_models", "yololite_n.yaml",  4),   # ~11 GB peak
+    "yololite-edge-n":  ("models",    "edge_n.yaml",      4),   # ~11 GB peak
     "yololite-s":       ("v2_models", "yololite_s.yaml",  4),   # ~14 GB peak
     "yololite-edge-s":  ("models",    "edge_s.yaml",      4),   # ~14 GB peak
     "yololite-m":       ("v2_models", "yololite_m.yaml",  4),   # ~16 GB peak
@@ -62,6 +64,28 @@ YOLOLITE_VARIANTS = {
     "yololite-xl":      ("models",    "yololite_xl.yaml", 1),   # ~52 GB peak
     "yololite-edge-xl": ("models",    "edge_xl.yaml",     1),   # ~52 GB peak
 }
+
+
+# ── GCS upload ────────────────────────────────────────────────────────────────
+
+def upload_to_gcs(*paths: str) -> None:
+    """Upload specific files to the GCS bucket, mirroring their relative path
+    under RESULTS_DIR.  Failures are logged but never abort the benchmark."""
+    for path in paths:
+        if not os.path.isfile(path):
+            continue
+        rel = os.path.relpath(path, RESULTS_DIR)
+        dest = f"{GCS_BUCKET}/{rel}"
+        try:
+            subprocess.run(
+                ["gcloud", "storage", "cp", path, dest],
+                check=True, capture_output=True, text=True,
+            )
+        except FileNotFoundError:
+            print("WARNING: gcloud CLI not found — skipping GCS upload")
+            return
+        except subprocess.CalledProcessError as e:
+            print(f"WARNING: GCS upload failed for {rel}: {e.stderr.strip()}")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -291,12 +315,15 @@ def main():
                 # Save incrementally after each run
                 df = pd.DataFrame(rows)
                 df.to_csv(RESULTS_CSV, index=False)
+                upload_to_gcs(RESULTS_CSV)
 
     # 4. Build and save the final results table
     df = pd.DataFrame(rows)
     df.to_csv(RESULTS_CSV, index=False)
+    upload_to_gcs(RESULTS_CSV)
 
     # Pivot tables for quick comparison
+    gcs_files = [RESULTS_CSV]
     if not df.empty and "error" not in df.columns or not df.get("error", pd.Series()).any():
         for metric in ["mAP50", "mAP50_95", "precision", "recall"]:
             pivot = df.pivot_table(
@@ -304,6 +331,7 @@ def main():
             )
             pivot_path = os.path.join(RESULTS_DIR, f"pivot_{metric}.csv")
             pivot.to_csv(pivot_path)
+            gcs_files.append(pivot_path)
             print(f"\nPivot table saved: {pivot_path}")
 
         # Mean across datasets per variant
@@ -314,10 +342,14 @@ def main():
         )
         summary_path = os.path.join(RESULTS_DIR, "summary_by_variant.csv")
         summary.to_csv(summary_path)
+        gcs_files.append(summary_path)
         print(f"Summary saved:     {summary_path}")
         print(f"\n{summary.to_string()}")
 
+    upload_to_gcs(*gcs_files)
+
     print(f"\nFull results:      {RESULTS_CSV}")
+    print(f"GCS results:       {GCS_BUCKET}/")
     print("Done.")
 
 
