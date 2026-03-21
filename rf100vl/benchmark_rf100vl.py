@@ -226,9 +226,12 @@ def run_single_training(
     }
 
 
-def _pool_initializer(gpu_id: int, max_concurrent: int) -> None:
-    """Called once per worker process before any task runs.  Sets
-    CUDA_VISIBLE_DEVICES so the subsequent torch import only sees one GPU."""
+def _pool_initializer(gpu_queue: multiprocessing.Queue, max_concurrent: int) -> None:
+    """Called once per worker process before any task runs.  Grabs a GPU ID
+    from the shared queue and sets CUDA_VISIBLE_DEVICES so the subsequent
+    torch import only sees one GPU.  Because the queue contains exactly
+    jobs_per_gpu entries per GPU, the per-GPU concurrency limit is enforced."""
+    gpu_id = gpu_queue.get()
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     threads = str(max(1, NUM_CPUS // max_concurrent))
     os.environ["OMP_NUM_THREADS"] = threads
@@ -326,28 +329,26 @@ def main():
 
         variant_csv = _variant_csv(variant)
 
-        # 3. Distribute jobs round-robin across GPUs, one pool per GPU.
-        #    Each pool's initializer sets CUDA_VISIBLE_DEVICES before any
-        #    task runs.  Because torch is NOT imported at module level,
-        #    CUDA is not yet initialized when the initializer executes.
-        gpu_jobs: list[list[tuple]] = [[] for _ in range(num_gpus)]
-        for i, job in enumerate(variant_jobs):
-            gpu_jobs[i % num_gpus].append(job)
-
-        pools = []
+        # 3. Single pool per variant.  A shared queue assigns GPU IDs to
+        #    workers: it contains exactly jobs_per_gpu copies of each GPU
+        #    ID, so at most jobs_per_gpu workers share any single GPU.
+        #    Because torch is NOT imported at module level and we use a
+        #    spawn context, CUDA is not yet initialized when the
+        #    initializer grabs its GPU ID from the queue.
+        gpu_queue = _SPAWN_CTX.Queue()
         for gpu_id in range(num_gpus):
-            pools.append(ProcessPoolExecutor(
-                max_workers=jobs_per_gpu,
-                mp_context=_SPAWN_CTX,
-                initializer=_pool_initializer,
-                initargs=(gpu_id, max_concurrent),
-            ))
+            for _ in range(jobs_per_gpu):
+                gpu_queue.put(gpu_id)
+
+        pool = ProcessPoolExecutor(
+            max_workers=max_concurrent,
+            mp_context=_SPAWN_CTX,
+            initializer=_pool_initializer,
+            initargs=(gpu_queue, max_concurrent),
+        )
 
         try:
-            futures = {}
-            for gpu_id, jobs in enumerate(gpu_jobs):
-                for job in jobs:
-                    futures[pools[gpu_id].submit(_worker, job)] = job
+            futures = {pool.submit(_worker, job): job for job in variant_jobs}
 
             for future in as_completed(futures):
                 result = future.result()
@@ -365,11 +366,7 @@ def main():
                 # Save per-variant CSV incrementally
                 pd.DataFrame(variant_rows[variant]).to_csv(variant_csv, index=False)
         finally:
-            # Shut down pools one at a time to avoid semaphore cleanup races
-            # (Python 3.10 bug where concurrent finalizers try to sem_unlink
-            # the same named semaphore twice).
-            for pool in pools:
-                pool.shutdown(wait=True)
+            pool.shutdown(wait=False, cancel_futures=True)
 
         # Sync entire results folder to GCS after each variant completes
         sync_results_to_gcs()
