@@ -158,7 +158,7 @@ def _coco_eval_from_lists(coco_images, coco_anns, coco_dets, iouType="bbox", num
     coco_anns:   [{"id":int,"image_id":int,"category_id":int,"bbox":[x,y,w,h],"area":float,"iscrowd":0}, ...]
     coco_dets:   [{"image_id":int,"category_id":int,"bbox":[x,y,w,h],"score":float}, ...]
     """
-    import os, json, tempfile
+    import os
     from pycocotools.coco import COCO
     from pycocotools.cocoeval import COCOeval
 
@@ -189,43 +189,34 @@ def _coco_eval_from_lists(coco_images, coco_anns, coco_dets, iouType="bbox", num
 
     categories = [{"id": i, "name": str(i)} for i in range(1, num_classes + 1)]
 
-    # Säkert sätt att skriva temporära filer
-    gt_fd, gt_path = tempfile.mkstemp(suffix=".json")
-    dt_fd, dt_path = tempfile.mkstemp(suffix=".json")
-    try:
-        with os.fdopen(gt_fd, "w", encoding="utf-8") as fg:
-            json.dump({
-                "info": {"description": "Auto COCO GT", "version": "1.0"},
-                "licenses": [],
-                "images": coco_images if coco_images else [],
-                "annotations": coco_anns,
-                "categories": categories,
-            }, fg)
+    # Build COCO GT object in-memory (avoids JSON serialization round-trip)
+    coco_gt = COCO()
+    coco_gt.dataset = {
+        "info": {"description": "Auto COCO GT", "version": "1.0"},
+        "licenses": [],
+        "images": coco_images if coco_images else [],
+        "annotations": coco_anns,
+        "categories": categories,
+    }
+    coco_gt.createIndex()
 
-        with os.fdopen(dt_fd, "w", encoding="utf-8") as fr:
-            json.dump(coco_dets, fr)
+    # loadRes from list of dicts directly
+    coco_dt = coco_gt.loadRes(coco_dets)
 
-        coco_gt = COCO(gt_path)
-        coco_dt = coco_gt.loadRes(dt_path)
-        E = COCOeval(coco_gt, coco_dt, iouType=iouType)
-        E.evaluate(); E.accumulate(); E.summarize()
-        return {
-            "AP":   float(E.stats[0]),
-            "AP50": float(E.stats[1]),
-            "AP75": float(E.stats[2]),
-            "APS":  float(E.stats[3]),
-            "APM":  float(E.stats[4]),
-            "APL":  float(E.stats[5]),
-            "AR":   float(E.stats[8]),
-            "ARS":  float(E.stats[9]),
-            "ARM":  float(E.stats[10]),
-            "ARL":  float(E.stats[11])
-        }
-    finally:
-        try: os.remove(gt_path)
-        except Exception: pass
-        try: os.remove(dt_path)
-        except Exception: pass
+    E = COCOeval(coco_gt, coco_dt, iouType=iouType)
+    E.evaluate(); E.accumulate(); E.summarize()
+    return {
+        "AP":   float(E.stats[0]),
+        "AP50": float(E.stats[1]),
+        "AP75": float(E.stats[2]),
+        "APS":  float(E.stats[3]),
+        "APM":  float(E.stats[4]),
+        "APL":  float(E.stats[5]),
+        "AR":   float(E.stats[8]),
+        "ARS":  float(E.stats[9]),
+        "ARM":  float(E.stats[10]),
+        "ARL":  float(E.stats[11])
+    }
 
 def _write_json_atomic(path, data):
     tmp = path + ".tmp"

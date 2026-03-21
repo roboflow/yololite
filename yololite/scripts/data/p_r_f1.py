@@ -28,25 +28,27 @@ def build_curves_from_coco(coco_images, coco_anns, coco_dets,
     
 
     # ---------------- helpers ----------------
-    def iou_xywh(a, b):
-        ax, ay, aw, ah = a
-        bx, by, bw, bh = b
-        ax2, ay2 = ax + aw, ay + ah
-        bx2, by2 = bx + bw, by + bh
-        ix1, iy1 = max(ax, bx), max(ay, by)
-        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
-        inter = iw * ih
-        ua = max(0.0, aw * ah) + max(0.0, bw * bh) - inter
-        return inter / ua if ua > 0 else 0.0
-
     def build_gt_index(anns):
-        # (img_id, cat_id) -> list of GT bboxes
+        # (img_id, cat_id) -> np.ndarray of shape (N, 4) in xywh format
         d = {}
         for a in anns:
             key = (int(a["image_id"]), int(a["category_id"]))
             d.setdefault(key, []).append(a["bbox"])
-        return d
+        return {k: np.array(v, dtype=np.float64) for k, v in d.items()}
+
+    def iou_one_vs_many(det_bbox, gt_arr):
+        """IoU of one xywh box against an (N,4) array of xywh boxes."""
+        dx, dy, dw, dh = det_bbox
+        gx, gy, gw, gh = gt_arr[:, 0], gt_arr[:, 1], gt_arr[:, 2], gt_arr[:, 3]
+        ix1 = np.maximum(dx, gx)
+        iy1 = np.maximum(dy, gy)
+        ix2 = np.minimum(dx + dw, gx + gw)
+        iy2 = np.minimum(dy + dh, gy + gh)
+        iw = np.maximum(0.0, ix2 - ix1)
+        ih = np.maximum(0.0, iy2 - iy1)
+        inter = iw * ih
+        ua = np.maximum(0.0, dw * dh) + np.maximum(0.0, gw * gh) - inter
+        return np.where(ua > 0, inter / ua, 0.0)
 
     # ---------------- PR curve (score-rankad svep) ----------------
     gt_index = build_gt_index(coco_anns)
@@ -58,19 +60,16 @@ def build_curves_from_coco(coco_images, coco_anns, coco_dets,
     tps, fps = [], []
     for d in dets_sorted:
         key = (int(d["image_id"]), int(d["category_id"]))
-        gts = gt_index.get(key, [])
-        if len(gts) == 0:
+        gt_arr = gt_index.get(key)
+        if gt_arr is None:
             fps.append(1.0); tps.append(0.0)
             continue
         flags = matched_flags[key]
-        best_j, best_iou = -1, 0.0
-        for j, g in enumerate(gts):
-            if flags[j]:
-                continue
-            iou_val = iou_xywh(d["bbox"], g)
-            if iou_val > best_iou:
-                best_iou = iou_val; best_j = j
-        if best_iou >= iou and best_j >= 0:
+        ious = iou_one_vs_many(d["bbox"], gt_arr)
+        ious[flags] = -1.0  # mask already-matched GTs
+        best_j = int(np.argmax(ious))
+        best_iou = ious[best_j]
+        if best_iou >= iou:
             flags[best_j] = True
             tps.append(1.0); fps.append(0.0)
         else:
@@ -98,41 +97,29 @@ def build_curves_from_coco(coco_images, coco_anns, coco_dets,
     precisions_rank = cum_tp / np.maximum(1, cum_tp + cum_fp)
 
 
-    # ---------------- P/R/F1 vs confidence (0..1 svep) ----------------
-    # För snabb åtkomst: indexera pred per (img, cat)
-    det_index = {}
-    for d in coco_dets:
-        key = (int(d["image_id"]), int(d["category_id"]))
-        det_index.setdefault(key, []).append(d)
-
+    # ---------------- P/R/F1 vs confidence (derived from ranked pass) ----
+    # Instead of re-running greedy matching 201 times, reuse the single
+    # score-ranked matching pass above.  For each confidence threshold we
+    # just need the cumulative TP/FP up to the last detection whose score
+    # >= threshold.  This is O(steps * log(n)) instead of O(steps * n * m).
+    scores_sorted = np.array(
+        [float(d.get("score", 0.0)) for d in dets_sorted]
+    )
     confs = np.linspace(0.0, 1.0, steps)
-    P_curve, R_curve, F1_curve = [], [], []
+    # For each threshold, find the last index where score >= thr.
+    # searchsorted on the reversed (ascending) scores gives us the count
+    # of detections below the threshold.
+    scores_asc = scores_sorted[::-1]
+    # n_above[i] = number of detections with score >= confs[i]
+    n_above = len(scores_sorted) - np.searchsorted(scores_asc, confs, side="left")
 
-    for thr in confs:
-        TP = FP = 0
-        matched = {k: np.zeros(len(v), dtype=bool) for k, v in gt_index.items()}
-        for key, gts in gt_index.items():
-            preds = [d for d in det_index.get(key, []) if float(d.get("score", 0.0)) >= thr]
-            preds.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
-            flags = matched[key]
-            for d in preds:
-                best_j, best_iou = -1, 0.0
-                for j, g in enumerate(gts):
-                    if flags[j]:
-                        continue
-                    iou_val = iou_xywh(d["bbox"], g)
-                    if iou_val > best_iou:
-                        best_iou = iou_val; best_j = j
-                if best_iou >= iou and best_j >= 0:
-                    flags[best_j] = True
-                    TP += 1
-                else:
-                    FP += 1
-        FN = total_gt - TP
-        P = TP / (TP + FP) if (TP + FP) > 0 else 0.0
-        R = TP / (TP + FN) if (TP + FN) > 0 else 0.0
-        F1 = 2 * P * R / (P + R) if (P + R) > 0 else 0.0
-        P_curve.append(P); R_curve.append(R); F1_curve.append(F1)
+    safe_idx = np.clip(n_above - 1, 0, len(cum_tp) - 1)
+    tp_at_thr = cum_tp[safe_idx]
+    n_safe = np.maximum(n_above, 1)
+    P_curve = np.where(n_above > 0, tp_at_thr / n_safe, 0.0)
+    R_curve = np.where(n_above > 0, tp_at_thr / max(1, total_gt), 0.0)
+    pr_sum = P_curve + R_curve
+    F1_curve = np.where(pr_sum > 0, 2 * P_curve * R_curve / np.maximum(pr_sum, 1e-16), 0.0)
 
     P_curve = np.array(P_curve); R_curve = np.array(R_curve); F1_curve = np.array(F1_curve)
     best_idx = int(np.argmax(F1_curve))
