@@ -12,8 +12,12 @@ RESULTS_DIR = "/dev/shm/rf100vl_benchmark_results"
 OUT_DIR = os.path.join(RESULTS_DIR, "plots")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# ── Load all per-variant CSVs ────────────────────────────────────────────────
-csvs = sorted(glob.glob(os.path.join(RESULTS_DIR, "results_*.csv")))
+# ── Load all per-variant training CSVs ────────────────────────────────────────
+# Support both old (results_*.csv) and new (train_results_*.csv) naming
+csvs = sorted(
+    glob.glob(os.path.join(RESULTS_DIR, "results_*.csv"))
+    + glob.glob(os.path.join(RESULTS_DIR, "train_results_*.csv"))
+)
 df = pd.concat([pd.read_csv(c) for c in csvs], ignore_index=True)
 df = df[df["mAP50"].notna()]  # drop failed runs
 
@@ -180,6 +184,81 @@ if pairs:
     fig.tight_layout()
     fig.savefig(os.path.join(OUT_DIR, "standard_vs_edge.png"), dpi=150)
     print(f"Saved: {OUT_DIR}/standard_vs_edge.png")
+
+# ── 8–10. Latency plots (from SAB benchmark CSVs) ───────────────────────────
+bench_csvs = sorted(glob.glob(os.path.join(RESULTS_DIR, "bench_results_*.csv")))
+if bench_csvs:
+    bdf = pd.concat([pd.read_csv(c) for c in bench_csvs], ignore_index=True)
+    bdf = bdf[bdf["mAP50_95"].notna()]
+    bdf_present = [v for v in VARIANT_ORDER if v in bdf["variant"].unique()]
+    bdf["variant"] = pd.Categorical(bdf["variant"], categories=bdf_present, ordered=True)
+
+    # ── 8. mAP vs latency Pareto curve (TRT-fp16) ───────────────────────────
+    fp16 = bdf[bdf["runtime"] == "TRT-fp16"]
+    if not fp16.empty:
+        fig, ax = plt.subplots(figsize=(10, 7))
+        for v in bdf_present:
+            vdf = fp16[fp16["variant"] == v]
+            if vdf.empty:
+                continue
+            mean_map = vdf["mAP50_95"].mean()
+            mean_lat = vdf["latency_median_ms"].mean()
+            is_edge = "edge" in v
+            marker = "D" if is_edge else "o"
+            color = variant_colors.get(v, "gray")
+            ax.scatter(mean_lat, mean_map, s=140, c=[color], marker=marker,
+                       edgecolors="black", linewidths=0.5, zorder=3)
+            ax.annotate(v, (mean_lat, mean_map), fontsize=7,
+                        textcoords="offset points", xytext=(6, 6))
+        ax.set_xlabel("Median TRT-fp16 latency (ms)")
+        ax.set_ylabel("Mean mAP@50:95")
+        ax.set_title("mAP vs latency (TRT-fp16)", fontweight="bold")
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(os.path.join(OUT_DIR, "map_vs_latency_pareto.png"), dpi=150)
+        print(f"Saved: {OUT_DIR}/map_vs_latency_pareto.png")
+
+    # ── 9. Latency bar chart (TRT-fp16) ─────────────────────────────────────
+    if not fp16.empty:
+        fig, ax = plt.subplots(figsize=(12, 5))
+        lat_means = fp16.groupby("variant", observed=True)["latency_median_ms"].mean()
+        lat_stds = fp16.groupby("variant", observed=True)["latency_median_ms"].std()
+        colors = [variant_colors.get(v, "gray") for v in lat_means.index]
+        ax.bar(range(len(lat_means)), lat_means, yerr=lat_stds, color=colors,
+               capsize=3, edgecolor="white", linewidth=0.5)
+        ax.set_xticks(range(len(lat_means)))
+        ax.set_xticklabels(lat_means.index, rotation=45, ha="right", fontsize=9)
+        ax.set_ylabel("Median latency (ms)")
+        ax.set_title("TRT-fp16 inference latency per variant", fontweight="bold")
+        ax.grid(axis="y", alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(os.path.join(OUT_DIR, "latency_bar_trt_fp16.png"), dpi=150)
+        print(f"Saved: {OUT_DIR}/latency_bar_trt_fp16.png")
+
+    # ── 10. Runtime comparison (mAP consistency across engines) ──────────────
+    runtimes = [rt for rt in ["ONNX-CPU", "TRT-fp32", "TRT-fp16"] if rt in bdf["runtime"].values]
+    if len(runtimes) > 1:
+        fig, ax = plt.subplots(figsize=(14, 5))
+        x = np.arange(len(bdf_present))
+        width = 0.8 / len(runtimes)
+        rt_colors = {"ONNX-CPU": "#4C72B0", "TRT-fp32": "#55A868", "TRT-fp16": "#DD8452"}
+        for i, rt in enumerate(runtimes):
+            rtdf = bdf[bdf["runtime"] == rt]
+            means = [rtdf[rtdf["variant"] == v]["mAP50_95"].mean() for v in bdf_present]
+            ax.bar(x + i * width - 0.4 + width / 2, means, width,
+                   label=rt, color=rt_colors.get(rt, "gray"))
+        ax.set_xticks(x)
+        ax.set_xticklabels(bdf_present, rotation=45, ha="right", fontsize=8)
+        ax.set_ylabel("Mean mAP@50:95")
+        ax.set_title("mAP@50:95 across inference engines (should be consistent)", fontweight="bold")
+        ax.set_ylim(0, 1)
+        ax.legend()
+        ax.grid(axis="y", alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(os.path.join(OUT_DIR, "runtime_comparison.png"), dpi=150)
+        print(f"Saved: {OUT_DIR}/runtime_comparison.png")
+else:
+    print("\nNo SAB benchmark CSVs found — skipping latency plots.")
 
 plt.close("all")
 print(f"\nAll plots saved to: {OUT_DIR}/")

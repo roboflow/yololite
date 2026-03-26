@@ -229,6 +229,7 @@ def export_decoded_onnx(
                 "cls_logits": {0: "batch"},
             },
             do_constant_folding=True,
+            external_data=False,
         )
 
 
@@ -309,6 +310,7 @@ def export_raw_onnx(
             output_names=output_names,
             dynamic_axes=dynamic_axes,
             do_constant_folding=True,
+            external_data=False,
         )
 
 
