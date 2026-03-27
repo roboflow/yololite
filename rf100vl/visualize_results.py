@@ -48,7 +48,7 @@ variant_colors = {v: base_colors[i] for i, v in enumerate(present)}
 # ── 1. Mean metrics bar chart ────────────────────────────────────────────────
 fig, axes = plt.subplots(1, 4, figsize=(18, 5))
 for ax, metric in zip(axes, ["mAP50", "mAP50_95", "precision", "recall"]):
-    means = df.groupby("variant", observed=True)[metric].mean()
+    means = df.groupby("variant", observed=True)[metric].median()
     stds = df.groupby("variant", observed=True)[metric].std()
     colors = [variant_colors[v] for v in means.index]
     bars = ax.bar(range(len(means)), means, yerr=stds, color=colors,
@@ -58,10 +58,10 @@ for ax, metric in zip(axes, ["mAP50", "mAP50_95", "precision", "recall"]):
     ax.set_title(metric, fontweight="bold")
     ax.set_ylim(0, 1)
     ax.grid(axis="y", alpha=0.3)
-fig.suptitle("Mean metrics across RF100-VL datasets (± std)", fontweight="bold", fontsize=13)
+fig.suptitle("Median metrics across RF100-VL datasets (± std)", fontweight="bold", fontsize=13)
 fig.tight_layout()
-fig.savefig(os.path.join(OUT_DIR, "mean_metrics_bar.png"), dpi=150)
-print(f"Saved: {OUT_DIR}/mean_metrics_bar.png")
+fig.savefig(os.path.join(OUT_DIR, "median_metrics_bar.png"), dpi=150)
+print(f"Saved: {OUT_DIR}/median_metrics_bar.png")
 
 # ── 2. Box plots per metric ─────────────────────────────────────────────────
 fig, axes = plt.subplots(2, 2, figsize=(16, 10))
@@ -115,41 +115,7 @@ fig.tight_layout()
 fig.savefig(os.path.join(OUT_DIR, "heatmap_mAP50_95.png"), dpi=150)
 print(f"Saved: {OUT_DIR}/heatmap_mAP50_95.png")
 
-# ── 5. Training time comparison ──────────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(12, 5))
-means_t = df.groupby("variant", observed=True)["train_s"].mean() / 3600  # hours
-stds_t = df.groupby("variant", observed=True)["train_s"].std() / 3600
-colors = [variant_colors[v] for v in means_t.index]
-ax.bar(range(len(means_t)), means_t, yerr=stds_t, color=colors,
-       capsize=3, edgecolor="white", linewidth=0.5)
-ax.set_xticks(range(len(means_t)))
-ax.set_xticklabels(means_t.index, rotation=45, ha="right", fontsize=9)
-ax.set_ylabel("Training time (hours)")
-ax.set_title("Mean training time per variant (100 epochs)", fontweight="bold")
-ax.grid(axis="y", alpha=0.3)
-fig.tight_layout()
-fig.savefig(os.path.join(OUT_DIR, "training_time.png"), dpi=150)
-print(f"Saved: {OUT_DIR}/training_time.png")
-
-# ── 6. Accuracy vs speed scatter ────────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(10, 7))
-for v in present:
-    vdf = df[df["variant"] == v]
-    mean_map = vdf["mAP50_95"].mean()
-    mean_time = vdf["train_s"].mean() / 3600
-    ax.scatter(mean_time, mean_map, s=120, c=[variant_colors[v]],
-               edgecolors="black", linewidths=0.5, zorder=3)
-    ax.annotate(v, (mean_time, mean_map), fontsize=7,
-                textcoords="offset points", xytext=(6, 6))
-ax.set_xlabel("Mean training time (hours)")
-ax.set_ylabel("Mean mAP@50:95")
-ax.set_title("Accuracy vs training time", fontweight="bold")
-ax.grid(alpha=0.3)
-fig.tight_layout()
-fig.savefig(os.path.join(OUT_DIR, "accuracy_vs_speed.png"), dpi=150)
-print(f"Saved: {OUT_DIR}/accuracy_vs_speed.png")
-
-# ── 7. Edge vs standard variant comparison ───────────────────────────────────
+# ── 5. Edge vs standard variant comparison ───────────────────────────────────
 # Pair up standard and edge variants
 pairs = []
 for v in present:
@@ -167,8 +133,8 @@ if pairs:
         for std_v, edge_v in pairs:
             size = std_v.split("-")[-1]
             x_labels.append(size)
-            std_means.append(df[df["variant"] == std_v][metric].mean())
-            edge_means.append(df[df["variant"] == edge_v][metric].mean())
+            std_means.append(df[df["variant"] == std_v][metric].median())
+            edge_means.append(df[df["variant"] == edge_v][metric].median())
 
         x = np.arange(len(x_labels))
         w = 0.35
@@ -180,7 +146,7 @@ if pairs:
         ax.set_ylim(0, 1)
         ax.legend()
         ax.grid(axis="y", alpha=0.3)
-    fig.suptitle("Standard vs Edge variants", fontweight="bold", fontsize=13)
+    fig.suptitle("Standard vs Edge variants (median across datasets)", fontweight="bold", fontsize=13)
     fig.tight_layout()
     fig.savefig(os.path.join(OUT_DIR, "standard_vs_edge.png"), dpi=150)
     print(f"Saved: {OUT_DIR}/standard_vs_edge.png")
@@ -201,8 +167,8 @@ if bench_csvs:
             vdf = fp16[fp16["variant"] == v]
             if vdf.empty:
                 continue
-            mean_map = vdf["mAP50_95"].mean()
-            mean_lat = vdf["latency_median_ms"].mean()
+            mean_map = vdf["mAP50_95"].median()
+            mean_lat = vdf["latency_median_ms"].median()
             is_edge = "edge" in v
             marker = "D" if is_edge else "o"
             color = variant_colors.get(v, "gray")
@@ -211,8 +177,8 @@ if bench_csvs:
             ax.annotate(v, (mean_lat, mean_map), fontsize=7,
                         textcoords="offset points", xytext=(6, 6))
         ax.set_xlabel("Median TRT-fp16 latency (ms)")
-        ax.set_ylabel("Mean mAP@50:95")
-        ax.set_title("mAP vs latency (TRT-fp16)", fontweight="bold")
+        ax.set_ylabel("Median mAP@50:95")
+        ax.set_title("mAP vs latency — median across datasets (TRT-fp16)", fontweight="bold")
         ax.grid(alpha=0.3)
         fig.tight_layout()
         fig.savefig(os.path.join(OUT_DIR, "map_vs_latency_pareto.png"), dpi=150)
@@ -221,7 +187,7 @@ if bench_csvs:
     # ── 9. Latency bar chart (TRT-fp16) ─────────────────────────────────────
     if not fp16.empty:
         fig, ax = plt.subplots(figsize=(12, 5))
-        lat_means = fp16.groupby("variant", observed=True)["latency_median_ms"].mean()
+        lat_means = fp16.groupby("variant", observed=True)["latency_median_ms"].median()
         lat_stds = fp16.groupby("variant", observed=True)["latency_median_ms"].std()
         colors = [variant_colors.get(v, "gray") for v in lat_means.index]
         ax.bar(range(len(lat_means)), lat_means, yerr=lat_stds, color=colors,
@@ -244,13 +210,13 @@ if bench_csvs:
         rt_colors = {"ONNX-CPU": "#4C72B0", "TRT-fp32": "#55A868", "TRT-fp16": "#DD8452"}
         for i, rt in enumerate(runtimes):
             rtdf = bdf[bdf["runtime"] == rt]
-            means = [rtdf[rtdf["variant"] == v]["mAP50_95"].mean() for v in bdf_present]
+            means = [rtdf[rtdf["variant"] == v]["mAP50_95"].median() for v in bdf_present]
             ax.bar(x + i * width - 0.4 + width / 2, means, width,
                    label=rt, color=rt_colors.get(rt, "gray"))
         ax.set_xticks(x)
         ax.set_xticklabels(bdf_present, rotation=45, ha="right", fontsize=8)
-        ax.set_ylabel("Mean mAP@50:95")
-        ax.set_title("mAP@50:95 across inference engines (should be consistent)", fontweight="bold")
+        ax.set_ylabel("Median mAP@50:95")
+        ax.set_title("Median mAP@50:95 across inference engines (should be consistent)", fontweight="bold")
         ax.set_ylim(0, 1)
         ax.legend()
         ax.grid(axis="y", alpha=0.3)
