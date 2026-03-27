@@ -21,9 +21,9 @@ from pathlib import Path
 import pandas as pd
 
 # ── Configuration ────────────────────────────────────────────────────────────
-RESULTS_DIR = "/dev/shm/rf100vl_benchmark_results"
+RESULTS_DIR = os.environ.get("RF100VL_RESULTS_DIR", "rf100vl_benchmark_results")
 ONNX_DIR = os.path.join(RESULTS_DIR, "onnx")
-COCO_DATASETS_DIR = "/dev/shm/rf100vl_datasets_coco"
+COCO_DATASETS_DIR = os.environ.get("RF100VL_COCO_DIR", "rf100vl_datasets_coco")
 GCS_BUCKET = "gs://rf-detr-rf100-vl/yololite-benchmark"
 
 # Same variant list as train_and_export.py (only names needed here)

@@ -21,9 +21,9 @@ from pathlib import Path
 
 import pandas as pd
 
-RESULTS_DIR = "/dev/shm/rf100vl_benchmark_results"
-DATASETS_DIR = "/dev/shm/rf100vl_datasets"  # YOLOv8 format (for native eval)
-COCO_DATASETS_DIR = "/dev/shm/rf100vl_datasets_coco"  # COCO format (for SAB eval)
+RESULTS_DIR = os.environ.get("RF100VL_RESULTS_DIR", "rf100vl_benchmark_results")
+DATASETS_DIR = os.environ.get("RF100VL_DATASETS_DIR", "rf100vl_datasets")  # YOLOv8 format (for native eval)
+COCO_DATASETS_DIR = os.environ.get("RF100VL_COCO_DIR", "rf100vl_datasets_coco")  # COCO format (for SAB eval)
 ONNX_DIR = os.path.join(RESULTS_DIR, "onnx")
 BATCH_SIZE = 16
 DELTA_THRESHOLD = 0.01  # 1% mAP difference triggers a warning

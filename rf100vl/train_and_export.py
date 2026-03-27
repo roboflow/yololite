@@ -28,8 +28,8 @@ import pandas as pd
 # initialize CUDA before the pool initializer can set CUDA_VISIBLE_DEVICES.
 
 # ── Configuration ────────────────────────────────────────────────────────────
-DATASETS_DIR = "/dev/shm/rf100vl_datasets"
-RESULTS_DIR = "/dev/shm/rf100vl_benchmark_results"
+DATASETS_DIR = os.environ.get("RF100VL_DATASETS_DIR", "rf100vl_datasets")
+RESULTS_DIR = os.environ.get("RF100VL_RESULTS_DIR", "rf100vl_benchmark_results")
 ONNX_DIR = os.path.join(RESULTS_DIR, "onnx")
 GCS_BUCKET = "gs://rf-detr-rf100-vl/yololite-benchmark"
 DATASETS_FORMAT = "yolov8"

@@ -11,7 +11,7 @@ import sys
 import traceback
 from pathlib import Path
 
-RESULTS_DIR = "/dev/shm/rf100vl_benchmark_results"
+RESULTS_DIR = os.environ.get("RF100VL_RESULTS_DIR", "rf100vl_benchmark_results")
 ONNX_DIR = os.path.join(RESULTS_DIR, "onnx")
 IMG_SIZE = 640
 

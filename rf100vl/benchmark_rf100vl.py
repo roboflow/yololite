@@ -30,8 +30,8 @@ import pandas as pd
 # initializer has restricted them to a single GPU.
 
 # ── Configuration ────────────────────────────────────────────────────────────
-DATASETS_DIR = "/dev/shm/rf100vl_datasets"
-RESULTS_DIR = "/dev/shm/rf100vl_benchmark_results"
+DATASETS_DIR = os.environ.get("RF100VL_DATASETS_DIR", "rf100vl_datasets")
+RESULTS_DIR = os.environ.get("RF100VL_RESULTS_DIR", "rf100vl_benchmark_results")
 RESULTS_CSV = os.path.join(RESULTS_DIR, "benchmark_results.csv")  # combined final
 GCS_BUCKET = "gs://rf-detr-rf100-vl/yololite-benchmark"
 DATASETS_FORMAT = "yolov8"
