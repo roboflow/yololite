@@ -158,7 +158,8 @@ if HAS_TRAINING:
         print(f"Saved: {OUT_DIR}/standard_vs_edge.png")
 
 # ── 8–10. Latency plots (from SAB benchmark CSVs) ───────────────────────────
-bench_csvs = sorted(glob.glob(os.path.join(RESULTS_DIR, "bench_results_*.csv")))
+SAB_DIR = os.path.join(RESULTS_DIR, "sab")
+bench_csvs = sorted(glob.glob(os.path.join(SAB_DIR, "bench_results_*.csv")))
 # Exclude the combined CSV to avoid double-counting
 bench_csvs = [c for c in bench_csvs if "combined" not in os.path.basename(c)]
 if bench_csvs:
@@ -218,31 +219,47 @@ if bench_csvs:
             fig.savefig(os.path.join(OUT_DIR, "heatmap_mAP50_95.png"), dpi=150)
             print(f"Saved: {OUT_DIR}/heatmap_mAP50_95.png")
 
-    # ── 8. mAP vs latency Pareto curve ───────────────────────────────────────
-    if best_runtime:
-        rt_df = bdf[bdf["runtime"] == best_runtime]
-        if not rt_df.empty:
-            fig, ax = plt.subplots(figsize=(10, 7))
-            for v in bdf_present:
-                vdf = rt_df[rt_df["variant"] == v]
-                if vdf.empty:
-                    continue
-                med_map = vdf["mAP50_95"].median()
-                med_lat = vdf["latency_median_ms"].median()
-                is_edge = "edge" in v
-                marker = "D" if is_edge else "o"
-                color = variant_colors.get(v, "gray")
-                ax.scatter(med_lat, med_map, s=140, c=[color], marker=marker,
-                           edgecolors="black", linewidths=0.5, zorder=3)
-                ax.annotate(v, (med_lat, med_map), fontsize=7,
-                            textcoords="offset points", xytext=(6, 6))
-            ax.set_xlabel(f"Median {best_runtime} latency (ms)")
-            ax.set_ylabel("Median mAP@50:95")
-            ax.set_title(f"mAP vs latency — median across datasets ({best_runtime})", fontweight="bold")
+    # ── 8. mAP vs latency — one subplot per runtime ─────────────────────────
+    rt_colors = {"ONNX-CPU": "#4C72B0", "TRT-fp32": "#55A868", "TRT-fp16": "#DD8452"}
+    metric_colors = {"mAP50": "#E24A33", "mAP50_95": "#348ABD"}
+    all_runtimes = ["ONNX-CPU", "TRT-fp32", "TRT-fp16"]
+    if available_runtimes:
+        fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+        for ax, rt in zip(axes, all_runtimes):
+            rt_df = bdf[bdf["runtime"] == rt]
+            if rt_df.empty:
+                ax.set_title(rt, fontweight="bold")
+                ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                        transform=ax.transAxes, fontsize=12, color="gray")
+                ax.set_xlabel("Median latency (ms)")
+                ax.set_ylabel("Median mAP")
+                ax.grid(alpha=0.3)
+                continue
+            for metric, label in [("mAP50", "mAP@50"), ("mAP50_95", "mAP@50:95")]:
+                lats, maps, labels = [], [], []
+                for v in bdf_present:
+                    vdf = rt_df[rt_df["variant"] == v]
+                    if vdf.empty:
+                        continue
+                    lats.append(vdf["latency_median_ms"].median())
+                    maps.append(vdf[metric].median())
+                    labels.append(v)
+                color = metric_colors[metric]
+                ax.scatter(lats, maps, s=120, c=color, marker="o",
+                           edgecolors="black", linewidths=0.5, zorder=3, label=label)
+                for lat, mval, lbl in zip(lats, maps, labels):
+                    ax.annotate(lbl, (lat, mval), fontsize=6,
+                                textcoords="offset points", xytext=(6, 4), alpha=0.7)
+            ax.set_title(rt, fontweight="bold")
+            ax.set_xlabel("Median latency (ms)")
+            ax.set_ylabel("Median mAP")
+            ax.set_ylim(0, 1)
+            ax.legend(fontsize=8)
             ax.grid(alpha=0.3)
-            fig.tight_layout()
-            fig.savefig(os.path.join(OUT_DIR, "map_vs_latency_pareto.png"), dpi=150)
-            print(f"Saved: {OUT_DIR}/map_vs_latency_pareto.png")
+        fig.suptitle("mAP vs latency — median across datasets", fontweight="bold", fontsize=13)
+        fig.tight_layout()
+        fig.savefig(os.path.join(OUT_DIR, "map_vs_latency_pareto.png"), dpi=150)
+        print(f"Saved: {OUT_DIR}/map_vs_latency_pareto.png")
 
     # ── 9. Latency bar chart ─────────────────────────────────────────────────
     if best_runtime:
@@ -277,7 +294,7 @@ if bench_csvs:
         ax.set_xticks(x)
         ax.set_xticklabels(bdf_present, rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("Median mAP@50:95")
-        ax.set_title("Median mAP@50:95 across inference engines (should be consistent)", fontweight="bold")
+        ax.set_title("Median mAP@50:95 across inference engines", fontweight="bold")
         ax.set_ylim(0, 1)
         ax.legend()
         ax.grid(axis="y", alpha=0.3)

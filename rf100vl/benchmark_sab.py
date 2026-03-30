@@ -89,8 +89,11 @@ def _onnx_path(dataset_name: str, variant_name: str) -> str:
     return os.path.join(ONNX_DIR, dataset_name, f"{variant_name}.onnx")
 
 
+SAB_DIR = os.path.join(RESULTS_DIR, "sab")
+
+
 def _variant_csv(variant: str) -> str:
-    return os.path.join(RESULTS_DIR, f"bench_results_{variant}.csv")
+    return os.path.join(SAB_DIR, f"bench_results_{variant}.csv")
 
 
 def benchmark_single(
@@ -168,7 +171,7 @@ def benchmark_single(
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    os.makedirs(RESULTS_DIR, exist_ok=True)
+    os.makedirs(SAB_DIR, exist_ok=True)
 
     # 1. Download COCO-format datasets
     coco_dataset_dirs = download_coco_datasets()
@@ -214,7 +217,7 @@ def main():
     total = total_models * 3  # 3 engines per (variant, dataset)
 
     # 4. Iterate datasets first, then variants within each dataset
-    for dataset_name, variant_onnx_list in list(datasets_with_models.items())[:3]:
+    for dataset_name, variant_onnx_list in list(datasets_with_models.items()):
         coco_dir = coco_by_name.get(dataset_name)
         if coco_dir is None:
             print(f"SKIP {dataset_name}: no COCO dataset found")
@@ -279,7 +282,7 @@ def main():
     # 5. Combined output
     all_rows = [r for rows in variant_rows.values() for r in rows]
     df = pd.DataFrame(all_rows)
-    combined_csv = os.path.join(RESULTS_DIR, "bench_results_combined.csv")
+    combined_csv = os.path.join(SAB_DIR, "bench_results_combined.csv")
     df.to_csv(combined_csv, index=False)
 
     sync_results_to_gcs()
