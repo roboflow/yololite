@@ -84,8 +84,7 @@ class AFDecode(nn.Module):
             ph = th.clamp(-4, 4).exp() * cell
 
         xyxy = self._xywh_to_xyxy(torch.stack([px, py, pw, ph], dim=-1))
-        xyxy[..., 0::2] = xyxy[..., 0::2].clamp(0, self.img_size - 1)
-        xyxy[..., 1::2] = xyxy[..., 1::2].clamp(0, self.img_size - 1)
+        xyxy = xyxy.clamp(0, self.img_size - 1)
 
         xyxy = xyxy.reshape(B, -1, 4)
         obj  = tobj.reshape(B, -1, 1)
@@ -229,6 +228,7 @@ def export_decoded_onnx(
                 "cls_logits": {0: "batch"},
             },
             do_constant_folding=True,
+            external_data=False,
         )
 
 
@@ -309,6 +309,7 @@ def export_raw_onnx(
             output_names=output_names,
             dynamic_axes=dynamic_axes,
             do_constant_folding=True,
+            external_data=False,
         )
 
 

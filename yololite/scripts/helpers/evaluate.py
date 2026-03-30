@@ -495,7 +495,7 @@ def evaluate_model(model, val_loader, log_dir, NUM_CLASSES, DEVICE, IMG_SIZE, ba
                 
             
 
-    # COCOeval 
+    # COCOeval
     coco_stats = _coco_eval_from_lists(
         coco_images, coco_anns, coco_dets, iouType="bbox", num_classes=NUM_CLASSES
     )
