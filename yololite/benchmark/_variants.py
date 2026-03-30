@@ -25,3 +25,11 @@ VARIANT_ORDER: list[str] = [
 ]
 
 VARIANT_NAMES: list[str] = list(YOLOLITE_VARIANTS.keys())
+
+# Standard vs edge groupings (small → large within each group)
+STANDARD_VARIANTS: list[str] = [
+    "yololite-n", "yololite-s", "yololite-m", "yololite-l", "yololite-xl",
+]
+EDGE_VARIANTS: list[str] = [
+    "yololite-edge-n", "yololite-edge-s", "yololite-edge-m", "yololite-edge-l", "yololite-edge-xl",
+]

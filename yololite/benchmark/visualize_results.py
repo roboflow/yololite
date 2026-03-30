@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Visualize benchmark results from per-variant CSVs.
+"""Visualize SAB benchmark results.
 
-Works with both RF100-VL (multi-dataset) and COCO (single-dataset) results.
-Generates training metric plots (1-5) and SAB latency/accuracy plots (6-10).
+Generates four plot types from SAB per-variant CSVs:
+
+1. Heatmap of mAP per dataset per variant (one per metric, per engine)
+2. Median mAP vs latency Pareto curves (3x2 grid: engines x metrics,
+   with separate curves for standard vs edge variants)
+3. Distribution of mAP@50 across datasets (box plots, per variant per engine)
+4. Distribution of latency across datasets (box plots, per variant per engine)
 """
 
 import argparse
@@ -13,325 +18,306 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from yololite.benchmark._variants import VARIANT_ORDER
+from yololite.benchmark._variants import (
+    EDGE_VARIANTS,
+    STANDARD_VARIANTS,
+    VARIANT_ORDER,
+)
 
-# ── Configuration ────────────────────────────────────────────────────────────
+# Short size labels for plot annotations
+SIZE_LABELS = {"n": "N", "s": "S", "m": "M", "l": "L", "xl": "XL"}
 
+RUNTIMES = ["ONNX-CPU", "TRT-fp32", "TRT-fp16"]
+
+STD_COLOR = "#4C72B0"
+EDGE_COLOR = "#DD8452"
+
+
+def _size_label(variant: str) -> str:
+    """Extract size label from variant name: 'yololite-edge-xl' -> 'XL'."""
+    size = variant.split("-")[-1]
+    return SIZE_LABELS.get(size, size.upper())
+
+
+def _load_sab_data(results_dir: str) -> pd.DataFrame | None:
+    sab_dir = os.path.join(results_dir, "sab")
+    csvs = sorted(glob.glob(os.path.join(sab_dir, "bench_results_*.csv")))
+    csvs = [c for c in csvs if "combined" not in os.path.basename(c)]
+    if not csvs:
+        return None
+    df = pd.concat([pd.read_csv(c) for c in csvs], ignore_index=True)
+    df = df[df["mAP50_95"].notna()]
+    present = [v for v in VARIANT_ORDER if v in df["variant"].unique()]
+    df["variant"] = pd.Categorical(df["variant"], categories=present, ordered=True)
+    return df
+
+
+# ── Plot 1: Heatmaps ────────────────────────────────────────────────────────
+
+def plot_heatmaps(df: pd.DataFrame, out_dir: str) -> None:
+    """Heatmap of mAP per dataset x variant, one per (metric, engine)."""
+    if "dataset" not in df.columns or df["dataset"].nunique() <= 1:
+        print("  Skipping heatmaps (single dataset).")
+        return
+
+    present = [v for v in VARIANT_ORDER if v in df["variant"].unique()]
+
+    for metric, title in [("mAP50", "mAP@50"), ("mAP50_95", "mAP@50:95")]:
+        if metric not in df.columns:
+            continue
+        for rt in RUNTIMES:
+            rt_df = df[df["runtime"] == rt]
+            if rt_df.empty:
+                continue
+
+            pivot = rt_df.pivot_table(
+                index="dataset", columns="variant", values=metric,
+                aggfunc="first", observed=True,
+            )
+            pivot = pivot.reindex(columns=[v for v in present if v in pivot.columns])
+            if pivot.empty:
+                continue
+            # Sort rows by first variant column descending
+            if pivot.columns[0] in pivot.columns:
+                pivot = pivot.sort_values(by=pivot.columns[0], ascending=False)
+
+            fig, ax = plt.subplots(figsize=(
+                max(8, len(pivot.columns) * 1.2),
+                max(12, len(pivot) * 0.18),
+            ))
+            im = ax.imshow(pivot.values, aspect="auto", cmap="RdYlGn", vmin=0, vmax=1)
+            ax.set_xticks(range(len(pivot.columns)))
+            ax.set_xticklabels(pivot.columns, rotation=45, ha="right", fontsize=8)
+            ax.set_yticks(range(len(pivot.index)))
+            ax.set_yticklabels(pivot.index, fontsize=6)
+            ax.set_title(f"{title} per dataset x variant ({rt})", fontweight="bold", fontsize=13)
+            fig.colorbar(im, ax=ax, shrink=0.5, label=title)
+            fig.tight_layout()
+
+            rt_slug = rt.lower().replace("-", "_")
+            fname = f"heatmap_{metric}_{rt_slug}.png"
+            fig.savefig(os.path.join(out_dir, fname), dpi=150)
+            plt.close(fig)
+            print(f"  Saved: {fname}")
+
+
+# ── Plot 2: mAP vs latency Pareto ───────────────────────────────────────────
+
+def _gather_curve(df_rt: pd.DataFrame, variants: list[str], metric: str):
+    """Return (latencies, maps, labels) for a list of variants, in order."""
+    lats, maps, labels = [], [], []
+    for v in variants:
+        vdf = df_rt[df_rt["variant"] == v]
+        if vdf.empty:
+            continue
+        lats.append(vdf["latency_median_ms"].median())
+        maps.append(vdf[metric].median())
+        labels.append(_size_label(v))
+    return lats, maps, labels
+
+
+def plot_map_vs_latency(df: pd.DataFrame, out_dir: str) -> None:
+    """3x2 grid: rows = engines, cols = mAP@50 / mAP@50:95.
+
+    Each subplot has two curves: YOLOLite (standard) and YOLOLite Edge,
+    connected by lines with size labels at each point.
+    """
+    available_rt = [rt for rt in RUNTIMES if rt in df["runtime"].values]
+    if not available_rt:
+        return
+
+    metrics = [("mAP50", "mAP@50"), ("mAP50_95", "mAP@50:95")]
+    nrows = len(available_rt)
+    ncols = len(metrics)
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7 * ncols, 5 * nrows), squeeze=False)
+
+    for row, rt in enumerate(available_rt):
+        rt_df = df[df["runtime"] == rt]
+        for col, (metric, metric_label) in enumerate(metrics):
+            ax = axes[row, col]
+
+            for variants, color, label in [
+                (STANDARD_VARIANTS, STD_COLOR, "YOLOLite"),
+                (EDGE_VARIANTS, EDGE_COLOR, "YOLOLite Edge"),
+            ]:
+                lats, maps, size_labels = _gather_curve(rt_df, variants, metric)
+                if not lats:
+                    continue
+                ax.plot(lats, maps, color=color, marker="o", markersize=8,
+                        linewidth=2, zorder=3, label=label)
+                for lat, mval, sl in zip(lats, maps, size_labels):
+                    ax.annotate(
+                        sl, (lat, mval), fontsize=9, fontweight="bold",
+                        color=color, textcoords="offset points",
+                        xytext=(6, 6), alpha=0.85,
+                    )
+
+            ax.set_xlabel("Latency [ms]", fontsize=11)
+            ax.set_ylabel(metric_label, fontsize=11)
+            ax.set_title(f"{metric_label} ({rt})", fontweight="bold", fontsize=12)
+            ax.legend(fontsize=9, loc="lower right")
+            ax.grid(alpha=0.2)
+
+    fig.suptitle("Object Detection: mAP vs Latency", fontweight="bold", fontsize=14, y=1.01)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "map_vs_latency.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: map_vs_latency.png")
+
+
+# ── Plot 3: mAP distribution ────────────────────────────────────────────────
+
+def plot_map_distribution(df: pd.DataFrame, out_dir: str) -> None:
+    """Box plots of mAP@50 across datasets, per variant, one subplot per engine."""
+    available_rt = [rt for rt in RUNTIMES if rt in df["runtime"].values]
+    if not available_rt:
+        return
+
+    present = [v for v in VARIANT_ORDER if v in df["variant"].unique()]
+    nrt = len(available_rt)
+    fig, axes = plt.subplots(1, nrt, figsize=(6 * nrt, 6), squeeze=False)
+
+    for i, rt in enumerate(available_rt):
+        ax = axes[0, i]
+        rt_df = df[df["runtime"] == rt]
+
+        data = []
+        tick_labels = []
+        colors = []
+        for v in present:
+            vals = rt_df[rt_df["variant"] == v]["mAP50"].dropna().values
+            if len(vals) == 0:
+                continue
+            data.append(vals)
+            tick_labels.append(_size_label(v))
+            colors.append(EDGE_COLOR if "edge" in v else STD_COLOR)
+
+        if not data:
+            continue
+
+        bp = ax.boxplot(
+            data, tick_labels=tick_labels, patch_artist=True,
+            showfliers=True, flierprops=dict(marker=".", markersize=3, alpha=0.4),
+        )
+        for patch, c in zip(bp["boxes"], colors):
+            patch.set_facecolor(c)
+            patch.set_alpha(0.7)
+
+        ax.set_title(f"mAP@50 ({rt})", fontweight="bold", fontsize=12)
+        ax.set_ylabel("mAP@50", fontsize=11)
+        ax.set_ylim(0, 1)
+        ax.grid(axis="y", alpha=0.2)
+
+    # Shared legend
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor=STD_COLOR, alpha=0.7, label="YOLOLite"),
+        Patch(facecolor=EDGE_COLOR, alpha=0.7, label="YOLOLite Edge"),
+    ]
+    axes[0, -1].legend(handles=legend_elements, fontsize=9, loc="lower right")
+
+    fig.suptitle("mAP@50 Distribution Across Datasets", fontweight="bold", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "map_distribution.png"), dpi=150)
+    plt.close(fig)
+    print(f"  Saved: map_distribution.png")
+
+
+# ── Plot 4: Latency distribution ────────────────────────────────────────────
+
+def plot_latency_distribution(df: pd.DataFrame, out_dir: str) -> None:
+    """Box plots of latency across datasets, per variant, one subplot per engine."""
+    available_rt = [rt for rt in RUNTIMES if rt in df["runtime"].values]
+    if not available_rt:
+        return
+
+    present = [v for v in VARIANT_ORDER if v in df["variant"].unique()]
+    nrt = len(available_rt)
+    fig, axes = plt.subplots(1, nrt, figsize=(6 * nrt, 6), squeeze=False)
+
+    for i, rt in enumerate(available_rt):
+        ax = axes[0, i]
+        rt_df = df[df["runtime"] == rt]
+
+        data = []
+        tick_labels = []
+        colors = []
+        for v in present:
+            vals = rt_df[rt_df["variant"] == v]["latency_median_ms"].dropna().values
+            if len(vals) == 0:
+                continue
+            data.append(vals)
+            tick_labels.append(_size_label(v))
+            colors.append(EDGE_COLOR if "edge" in v else STD_COLOR)
+
+        if not data:
+            continue
+
+        bp = ax.boxplot(
+            data, tick_labels=tick_labels, patch_artist=True,
+            showfliers=True, flierprops=dict(marker=".", markersize=3, alpha=0.4),
+        )
+        for patch, c in zip(bp["boxes"], colors):
+            patch.set_facecolor(c)
+            patch.set_alpha(0.7)
+
+        ax.set_title(f"Latency ({rt})", fontweight="bold", fontsize=12)
+        ax.set_ylabel("Latency [ms]", fontsize=11)
+        ax.grid(axis="y", alpha=0.2)
+
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor=STD_COLOR, alpha=0.7, label="YOLOLite"),
+        Patch(facecolor=EDGE_COLOR, alpha=0.7, label="YOLOLite Edge"),
+    ]
+    axes[0, -1].legend(handles=legend_elements, fontsize=9, loc="upper right")
+
+    fig.suptitle("Inference Latency Distribution Across Datasets", fontweight="bold", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "latency_distribution.png"), dpi=150)
+    plt.close(fig)
+    print(f"  Saved: latency_distribution.png")
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualize benchmark results",
+        description="Visualize SAB benchmark results",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument(
-        "--results-dir",
-        type=str,
-        default=os.environ.get("RF100VL_RESULTS_DIR", "rf100vl_benchmark_results"),
-        help="Results directory containing per-variant CSVs",
-    )
+    parser.add_argument("--results-dir", type=str,
+                        default="rf100vl_benchmark_results",
+                        help="Results directory containing sab/ CSVs")
     args = parser.parse_args()
 
-    RESULTS_DIR = args.results_dir
-    OUT_DIR = os.path.join(RESULTS_DIR, "plots")
-    os.makedirs(OUT_DIR, exist_ok=True)
+    out_dir = os.path.join(args.results_dir, "plots")
+    os.makedirs(out_dir, exist_ok=True)
 
-    # ── Load training CSVs ───────────────────────────────────────────────────
-    csvs = sorted(
-        glob.glob(os.path.join(RESULTS_DIR, "results_*.csv"))
-        + glob.glob(os.path.join(RESULTS_DIR, "train_results_*.csv"))
-    )
-    # Exclude combined CSVs
-    csvs = [c for c in csvs if "combined" not in os.path.basename(c)]
+    df = _load_sab_data(args.results_dir)
+    if df is None or df.empty:
+        print("No SAB benchmark CSVs found. Nothing to plot.")
+        return
 
-    if csvs:
-        df = pd.concat([pd.read_csv(c) for c in csvs], ignore_index=True)
-        # Only keep rows with mAP50 (training results with metrics)
-        if "mAP50" in df.columns:
-            df = df[df["mAP50"].notna()]
-        present = [v for v in VARIANT_ORDER if v in df["variant"].unique()]
-        df["variant"] = pd.Categorical(df["variant"], categories=present, ordered=True)
-        HAS_TRAINING = len(present) > 0 and "mAP50" in df.columns
-    else:
-        print("No training CSVs found -- skipping training plots (1-5).\n")
-        HAS_TRAINING = False
+    available_rt = [rt for rt in RUNTIMES if rt in df["runtime"].values]
+    present = [v for v in VARIANT_ORDER if v in df["variant"].unique()]
+    print(f"Loaded {len(df)} results: {len(present)} variants, "
+          f"{len(available_rt)} engines")
+    if "dataset" in df.columns:
+        print(f"  Datasets: {df['dataset'].nunique()}")
+    print()
 
-    if HAS_TRAINING:
-        multi_dataset = "dataset" in df.columns and df["dataset"].nunique() > 1
+    print("Heatmaps:")
+    plot_heatmaps(df, out_dir)
+    print("\nmAP vs Latency:")
+    plot_map_vs_latency(df, out_dir)
+    print("\nmAP Distribution:")
+    plot_map_distribution(df, out_dir)
+    print("\nLatency Distribution:")
+    plot_latency_distribution(df, out_dir)
 
-        # ── Summary table ────────────────────────────────────────────────────
-        metrics_cols = [c for c in ["mAP50", "mAP50_95", "precision", "recall"] if c in df.columns]
-        if metrics_cols:
-            summary = (
-                df.groupby("variant", observed=True)[metrics_cols]
-                .agg(["mean", "median", "std", "count"])
-            )
-            summary.to_csv(os.path.join(OUT_DIR, "summary_stats.csv"))
-            print(summary.to_string())
-            print()
-
-        # ── Color palette ────────────────────────────────────────────────────
-        base_colors = plt.cm.tab10(np.linspace(0, 1, 10))
-        variant_colors = {v: base_colors[i] for i, v in enumerate(present)}
-
-        # ── 1. Median metrics bar chart ──────────────────────────────────────
-        if metrics_cols:
-            fig, axes = plt.subplots(1, len(metrics_cols), figsize=(4.5 * len(metrics_cols), 5))
-            if len(metrics_cols) == 1:
-                axes = [axes]
-            for ax, metric in zip(axes, metrics_cols):
-                means = df.groupby("variant", observed=True)[metric].median()
-                stds = df.groupby("variant", observed=True)[metric].std()
-                colors = [variant_colors[v] for v in means.index]
-                ax.bar(range(len(means)), means, yerr=stds, color=colors,
-                       capsize=3, edgecolor="white", linewidth=0.5)
-                ax.set_xticks(range(len(means)))
-                ax.set_xticklabels(means.index, rotation=45, ha="right", fontsize=8)
-                ax.set_title(metric, fontweight="bold")
-                ax.set_ylim(0, 1)
-                ax.grid(axis="y", alpha=0.3)
-            fig.suptitle("Median metrics across datasets (+/- std)", fontweight="bold", fontsize=13)
-            fig.tight_layout()
-            fig.savefig(os.path.join(OUT_DIR, "median_metrics_bar.png"), dpi=150)
-            print(f"Saved: {OUT_DIR}/median_metrics_bar.png")
-
-        # ── 2. Box plots per metric ──────────────────────────────────────────
-        if metrics_cols:
-            ncols = min(len(metrics_cols), 2)
-            nrows = (len(metrics_cols) + ncols - 1) // ncols
-            fig, axes = plt.subplots(nrows, ncols, figsize=(8 * ncols, 5 * nrows))
-            axes_flat = [axes] if len(metrics_cols) == 1 else axes.flat
-            for ax, metric in zip(axes_flat, metrics_cols):
-                data = [df[df["variant"] == v][metric].dropna().values for v in present]
-                bp = ax.boxplot(data, tick_labels=present, patch_artist=True, showfliers=True,
-                                flierprops=dict(marker=".", markersize=3, alpha=0.4))
-                for patch, v in zip(bp["boxes"], present):
-                    patch.set_facecolor(variant_colors[v])
-                    patch.set_alpha(0.7)
-                ax.set_xticklabels(present, rotation=45, ha="right", fontsize=8)
-                ax.set_title(metric, fontweight="bold")
-                ax.set_ylim(0, 1)
-                ax.grid(axis="y", alpha=0.3)
-            fig.suptitle("Metric distributions across datasets", fontweight="bold", fontsize=13)
-            fig.tight_layout()
-            fig.savefig(os.path.join(OUT_DIR, "metric_boxplots.png"), dpi=150)
-            print(f"Saved: {OUT_DIR}/metric_boxplots.png")
-
-        # ── 3 & 4. Per-dataset heatmaps (only for multi-dataset) ────────────
-        if multi_dataset:
-            for metric, title in [("mAP50", "mAP@50"), ("mAP50_95", "mAP@50:95")]:
-                if metric not in df.columns:
-                    continue
-                pivot = df.pivot_table(index="dataset", columns="variant", values=metric,
-                                       aggfunc="first", observed=True)
-                pivot = pivot.reindex(columns=present)
-                if present[0] in pivot.columns:
-                    pivot = pivot.sort_values(by=present[0], ascending=False)
-
-                fig, ax = plt.subplots(figsize=(max(8, len(present) * 1.2),
-                                                max(12, len(pivot) * 0.18)))
-                im = ax.imshow(pivot.values, aspect="auto", cmap="RdYlGn", vmin=0, vmax=1)
-                ax.set_xticks(range(len(pivot.columns)))
-                ax.set_xticklabels(pivot.columns, rotation=45, ha="right", fontsize=8)
-                ax.set_yticks(range(len(pivot.index)))
-                ax.set_yticklabels(pivot.index, fontsize=6)
-                ax.set_title(f"{title} per dataset x variant", fontweight="bold", fontsize=13)
-                fig.colorbar(im, ax=ax, shrink=0.5, label=title)
-                fig.tight_layout()
-                fname = f"heatmap_{metric}.png"
-                fig.savefig(os.path.join(OUT_DIR, fname), dpi=150)
-                print(f"Saved: {OUT_DIR}/{fname}")
-
-        # ── 5. Edge vs standard variant comparison ───────────────────────────
-        pairs = []
-        for v in present:
-            if "edge" not in v:
-                edge_v = v.replace("yololite-", "yololite-edge-")
-                if edge_v in present:
-                    pairs.append((v, edge_v))
-
-        if pairs and "mAP50" in df.columns:
-            compare_metrics = [m for m in ["mAP50", "mAP50_95"] if m in df.columns]
-            fig, axes = plt.subplots(1, len(compare_metrics), figsize=(7 * len(compare_metrics), 5))
-            if len(compare_metrics) == 1:
-                axes = [axes]
-            for ax, metric in zip(axes, compare_metrics):
-                x_labels = []
-                std_means = []
-                edge_means = []
-                for std_v, edge_v in pairs:
-                    size = std_v.split("-")[-1]
-                    x_labels.append(size)
-                    std_means.append(df[df["variant"] == std_v][metric].median())
-                    edge_means.append(df[df["variant"] == edge_v][metric].median())
-
-                x = np.arange(len(x_labels))
-                w = 0.35
-                ax.bar(x - w / 2, std_means, w, label="Standard", color="#4C72B0")
-                ax.bar(x + w / 2, edge_means, w, label="Edge", color="#DD8452")
-                ax.set_xticks(x)
-                ax.set_xticklabels(x_labels, fontsize=10)
-                ax.set_title(metric, fontweight="bold")
-                ax.set_ylim(0, 1)
-                ax.legend()
-                ax.grid(axis="y", alpha=0.3)
-            fig.suptitle("Standard vs Edge variants (median across datasets)",
-                         fontweight="bold", fontsize=13)
-            fig.tight_layout()
-            fig.savefig(os.path.join(OUT_DIR, "standard_vs_edge.png"), dpi=150)
-            print(f"Saved: {OUT_DIR}/standard_vs_edge.png")
-
-    # ── SAB benchmark plots ──────────────────────────────────────────────────
-    SAB_DIR = os.path.join(RESULTS_DIR, "sab")
-    bench_csvs = sorted(glob.glob(os.path.join(SAB_DIR, "bench_results_*.csv")))
-    bench_csvs = [c for c in bench_csvs if "combined" not in os.path.basename(c)]
-
-    if bench_csvs:
-        bdf = pd.concat([pd.read_csv(c) for c in bench_csvs], ignore_index=True)
-        bdf = bdf[bdf["mAP50_95"].notna()]
-        bdf_present = [v for v in VARIANT_ORDER if v in bdf["variant"].unique()]
-        bdf["variant"] = pd.Categorical(bdf["variant"], categories=bdf_present, ordered=True)
-
-        base_colors = plt.cm.tab10(np.linspace(0, 1, 10))
-        if not HAS_TRAINING:
-            variant_colors = {v: base_colors[i] for i, v in enumerate(bdf_present)}
-
-        available_runtimes = [rt for rt in ["TRT-fp16", "TRT-fp32", "ONNX-CPU"]
-                              if rt in bdf["runtime"].values]
-        best_runtime = available_runtimes[0] if available_runtimes else None
-
-        # ── 6. Median mAP bar chart from SAB (fallback if no training data) ─
-        if not HAS_TRAINING:
-            onnx_cpu = bdf[bdf["runtime"] == "ONNX-CPU"]
-            if not onnx_cpu.empty:
-                fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-                for ax, metric in zip(axes, ["mAP50", "mAP50_95"]):
-                    medians = onnx_cpu.groupby("variant", observed=True)[metric].median()
-                    stds = onnx_cpu.groupby("variant", observed=True)[metric].std()
-                    colors = [variant_colors.get(v, "gray") for v in medians.index]
-                    ax.bar(range(len(medians)), medians, yerr=stds, color=colors,
-                           capsize=3, edgecolor="white", linewidth=0.5)
-                    ax.set_xticks(range(len(medians)))
-                    ax.set_xticklabels(medians.index, rotation=45, ha="right", fontsize=8)
-                    ax.set_title(metric, fontweight="bold")
-                    ax.set_ylim(0, 1)
-                    ax.grid(axis="y", alpha=0.3)
-                fig.suptitle("Median metrics (ONNX-CPU, +/- std)", fontweight="bold", fontsize=13)
-                fig.tight_layout()
-                fig.savefig(os.path.join(OUT_DIR, "median_metrics_bar.png"), dpi=150)
-                print(f"Saved: {OUT_DIR}/median_metrics_bar.png")
-
-        # ── 7. Per-dataset heatmap from SAB (fallback) ──────────────────────
-        if not HAS_TRAINING and "dataset" in bdf.columns and bdf["dataset"].nunique() > 1:
-            onnx_cpu = bdf[bdf["runtime"] == "ONNX-CPU"]
-            if not onnx_cpu.empty:
-                pivot95 = onnx_cpu.pivot_table(index="dataset", columns="variant",
-                                               values="mAP50_95", aggfunc="first",
-                                               observed=True)
-                pivot95 = pivot95.reindex(columns=bdf_present)
-                if bdf_present[0] in pivot95.columns:
-                    pivot95 = pivot95.sort_values(by=bdf_present[0], ascending=False)
-
-                fig, ax = plt.subplots(figsize=(max(8, len(bdf_present) * 1.2),
-                                                max(12, len(pivot95) * 0.18)))
-                im = ax.imshow(pivot95.values, aspect="auto", cmap="RdYlGn", vmin=0, vmax=1)
-                ax.set_xticks(range(len(pivot95.columns)))
-                ax.set_xticklabels(pivot95.columns, rotation=45, ha="right", fontsize=8)
-                ax.set_yticks(range(len(pivot95.index)))
-                ax.set_yticklabels(pivot95.index, fontsize=6)
-                ax.set_title("mAP@50:95 per dataset x variant (ONNX-CPU)",
-                             fontweight="bold", fontsize=13)
-                fig.colorbar(im, ax=ax, shrink=0.5, label="mAP@50:95")
-                fig.tight_layout()
-                fig.savefig(os.path.join(OUT_DIR, "heatmap_mAP50_95.png"), dpi=150)
-                print(f"Saved: {OUT_DIR}/heatmap_mAP50_95.png")
-
-        # ── 8. mAP vs latency -- one subplot per runtime ────────────────────
-        metric_colors = {"mAP50": "#E24A33", "mAP50_95": "#348ABD"}
-        all_runtimes = ["ONNX-CPU", "TRT-fp32", "TRT-fp16"]
-        if available_runtimes:
-            fig, axes = plt.subplots(1, 3, figsize=(20, 6))
-            for ax, rt in zip(axes, all_runtimes):
-                rt_df = bdf[bdf["runtime"] == rt]
-                if rt_df.empty:
-                    ax.set_title(rt, fontweight="bold")
-                    ax.text(0.5, 0.5, "No data", ha="center", va="center",
-                            transform=ax.transAxes, fontsize=12, color="gray")
-                    ax.set_xlabel("Median latency (ms)")
-                    ax.set_ylabel("Median mAP")
-                    ax.grid(alpha=0.3)
-                    continue
-                for metric, label in [("mAP50", "mAP@50"), ("mAP50_95", "mAP@50:95")]:
-                    lats, maps, labels = [], [], []
-                    for v in bdf_present:
-                        vdf = rt_df[rt_df["variant"] == v]
-                        if vdf.empty:
-                            continue
-                        lats.append(vdf["latency_median_ms"].median())
-                        maps.append(vdf[metric].median())
-                        labels.append(v)
-                    color = metric_colors[metric]
-                    ax.scatter(lats, maps, s=120, c=color, marker="o",
-                               edgecolors="black", linewidths=0.5, zorder=3, label=label)
-                    for lat, mval, lbl in zip(lats, maps, labels):
-                        ax.annotate(lbl, (lat, mval), fontsize=6,
-                                    textcoords="offset points", xytext=(6, 4), alpha=0.7)
-                ax.set_title(rt, fontweight="bold")
-                ax.set_xlabel("Median latency (ms)")
-                ax.set_ylabel("Median mAP")
-                ax.set_ylim(0, 1)
-                ax.legend(fontsize=8)
-                ax.grid(alpha=0.3)
-            fig.suptitle("mAP vs latency -- median across datasets", fontweight="bold", fontsize=13)
-            fig.tight_layout()
-            fig.savefig(os.path.join(OUT_DIR, "map_vs_latency_pareto.png"), dpi=150)
-            print(f"Saved: {OUT_DIR}/map_vs_latency_pareto.png")
-
-        # ── 9. Latency bar chart ────────────────────────────────────────────
-        if best_runtime:
-            rt_df = bdf[bdf["runtime"] == best_runtime]
-            if not rt_df.empty:
-                fig, ax = plt.subplots(figsize=(12, 5))
-                lat_medians = rt_df.groupby("variant", observed=True)["latency_median_ms"].median()
-                lat_stds = rt_df.groupby("variant", observed=True)["latency_median_ms"].std()
-                colors = [variant_colors.get(v, "gray") for v in lat_medians.index]
-                ax.bar(range(len(lat_medians)), lat_medians, yerr=lat_stds, color=colors,
-                       capsize=3, edgecolor="white", linewidth=0.5)
-                ax.set_xticks(range(len(lat_medians)))
-                ax.set_xticklabels(lat_medians.index, rotation=45, ha="right", fontsize=9)
-                ax.set_ylabel("Median latency (ms)")
-                ax.set_title(f"{best_runtime} inference latency per variant", fontweight="bold")
-                ax.grid(axis="y", alpha=0.3)
-                fig.tight_layout()
-                fname = f"latency_bar_{best_runtime.lower().replace('-', '_')}.png"
-                fig.savefig(os.path.join(OUT_DIR, fname), dpi=150)
-                print(f"Saved: {OUT_DIR}/{fname}")
-
-        # ── 10. Runtime comparison ──────────────────────────────────────────
-        if len(available_runtimes) > 1:
-            fig, ax = plt.subplots(figsize=(14, 5))
-            x = np.arange(len(bdf_present))
-            width = 0.8 / len(available_runtimes)
-            rt_colors = {"ONNX-CPU": "#4C72B0", "TRT-fp32": "#55A868", "TRT-fp16": "#DD8452"}
-            for i, rt in enumerate(available_runtimes):
-                rtdf = bdf[bdf["runtime"] == rt]
-                means = [rtdf[rtdf["variant"] == v]["mAP50_95"].median() for v in bdf_present]
-                ax.bar(x + i * width - 0.4 + width / 2, means, width,
-                       label=rt, color=rt_colors.get(rt, "gray"))
-            ax.set_xticks(x)
-            ax.set_xticklabels(bdf_present, rotation=45, ha="right", fontsize=8)
-            ax.set_ylabel("Median mAP@50:95")
-            ax.set_title("Median mAP@50:95 across inference engines", fontweight="bold")
-            ax.set_ylim(0, 1)
-            ax.legend()
-            ax.grid(axis="y", alpha=0.3)
-            fig.tight_layout()
-            fig.savefig(os.path.join(OUT_DIR, "runtime_comparison.png"), dpi=150)
-            print(f"Saved: {OUT_DIR}/runtime_comparison.png")
-    else:
-        print("\nNo SAB benchmark CSVs found -- skipping latency plots.")
-
-    plt.close("all")
-    print(f"\nAll plots saved to: {OUT_DIR}/")
+    print(f"\nAll plots saved to: {out_dir}/")
 
 
 if __name__ == "__main__":
