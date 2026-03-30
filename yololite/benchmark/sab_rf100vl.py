@@ -1,76 +1,52 @@
 #!/usr/bin/env python3
-"""Orchestrate single_artifact_benchmarking across all RF100-VL datasets.
+"""Run SAB benchmarking across all RF100-VL datasets.
 
-For each yololite variant with exported ONNX models (from train_and_export.py),
+For each yololite variant with exported ONNX models (from train_rf100vl.py),
 runs SAB benchmarking with ONNX-CPU, TRT-fp32, and TRT-fp16 engines.
 
 Expects:
-  - ONNX models at  RESULTS_DIR/onnx/{dataset}/{variant}.onnx
-  - COCO-format datasets at COCO_DATASETS_DIR/{dataset}/test/
+  - ONNX models at  <results-dir>/onnx/{dataset}/{variant}.onnx
+  - COCO-format datasets at <coco-datasets-dir>/{dataset}/test/
     (downloaded by this script if missing)
 
-Produces per-variant CSVs: RESULTS_DIR/bench_results_{variant}.csv
+Produces per-variant CSVs: <results-dir>/sab/bench_results_{variant}.csv
 """
 
-import json
+import argparse
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 import pandas as pd
 
-# ── Configuration ────────────────────────────────────────────────────────────
-RESULTS_DIR = os.environ.get("RF100VL_RESULTS_DIR", "rf100vl_benchmark_results")
-ONNX_DIR = os.path.join(RESULTS_DIR, "onnx")
-COCO_DATASETS_DIR = os.environ.get("RF100VL_COCO_DIR", "rf100vl_datasets_coco")
-GCS_BUCKET = "gs://rf-detr-rf100-vl/yololite-benchmark"
-
-# Same variant list as train_and_export.py (only names needed here)
-YOLOLITE_VARIANTS = [
-    "yololite-n", "yololite-edge-n",
-    "yololite-s", "yololite-edge-s",
-    "yololite-m", "yololite-edge-m",
-    "yololite-l", "yololite-edge-l",
-    "yololite-xl", "yololite-edge-xl",
-]
-
-
-# ── GCS upload ────────────────────────────────────────────────────────────────
-
-def sync_results_to_gcs() -> None:
-    try:
-        subprocess.run(
-            ["gcloud", "storage", "rsync", "-r", RESULTS_DIR, GCS_BUCKET],
-            check=True, capture_output=True, text=True,
-        )
-    except FileNotFoundError:
-        print("WARNING: gcloud CLI not found — skipping GCS sync")
-    except subprocess.CalledProcessError as e:
-        print(f"WARNING: GCS sync failed: {e.stderr.strip()}")
+from yololite.benchmark._io import (
+    build_completed_set,
+    load_variant_csv,
+    save_variant_csv,
+)
+from yololite.benchmark._variants import VARIANT_NAMES
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def download_coco_datasets() -> list[str]:
+def download_coco_datasets(coco_datasets_dir: str) -> list[str]:
     """Download RF100-VL datasets in COCO format for SAB evaluation."""
     from rf100vl import download_rf100vl
 
     print(f"\n{'='*70}")
-    print("Downloading RF100-VL datasets (COCO format) …")
-    print(f"  destination: {COCO_DATASETS_DIR}")
+    print("Downloading RF100-VL datasets (COCO format) ...")
+    print(f"  destination: {coco_datasets_dir}")
     print(f"{'='*70}\n")
 
     download_rf100vl(
-        path=COCO_DATASETS_DIR,
+        path=coco_datasets_dir,
         model_format="coco",
         overwrite=False,
     )
 
-    # Find all dataset directories that have a test split with annotations
     dataset_dirs = sorted(
         str(p.parent.parent)
-        for p in Path(COCO_DATASETS_DIR).rglob("test/_annotations.coco.json")
+        for p in Path(coco_datasets_dir).rglob("test/_annotations.coco.json")
     )
     print(f"\nFound {len(dataset_dirs)} COCO datasets with test annotations")
     return dataset_dirs
@@ -85,15 +61,12 @@ def _find_coco_test(dataset_dir: str) -> tuple[str, str] | None:
     return None
 
 
-def _onnx_path(dataset_name: str, variant_name: str) -> str:
-    return os.path.join(ONNX_DIR, dataset_name, f"{variant_name}.onnx")
+def _onnx_path(onnx_dir: str, dataset_name: str, variant_name: str) -> str:
+    return os.path.join(onnx_dir, dataset_name, f"{variant_name}.onnx")
 
 
-SAB_DIR = os.path.join(RESULTS_DIR, "sab")
-
-
-def _variant_csv(variant: str) -> str:
-    return os.path.join(SAB_DIR, f"bench_results_{variant}.csv")
+def _variant_csv(sab_dir: str, variant: str) -> str:
+    return os.path.join(sab_dir, f"bench_results_{variant}.csv")
 
 
 def benchmark_single(
@@ -171,21 +144,36 @@ def benchmark_single(
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    os.makedirs(SAB_DIR, exist_ok=True)
+    parser = argparse.ArgumentParser(
+        description="Run SAB benchmarking across all RF100-VL datasets",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--results-dir", type=str, default="rf100vl_benchmark_results",
+                        help="Results output directory")
+    parser.add_argument("--coco-datasets-dir", type=str, default="rf100vl_datasets_coco",
+                        help="COCO datasets directory")
+    args = parser.parse_args()
+
+    results_dir = args.results_dir
+    onnx_dir = os.path.join(results_dir, "onnx")
+    sab_dir = os.path.join(results_dir, "sab")
+    coco_datasets_dir = args.coco_datasets_dir
+
+    os.makedirs(sab_dir, exist_ok=True)
 
     # 1. Download COCO-format datasets
-    coco_dataset_dirs = download_coco_datasets()
+    coco_dataset_dirs = download_coco_datasets(coco_datasets_dir)
     if not coco_dataset_dirs:
         print("ERROR: No COCO datasets found. Check ROBOFLOW_API_KEY.")
         sys.exit(1)
 
     coco_by_name = {Path(d).name: d for d in coco_dataset_dirs}
 
-    # 2. Discover available ONNX models, keyed by dataset
-    datasets_with_models: dict[str, list[tuple[str, str]]] = {}  # dataset -> [(variant, onnx)]
+    # 2. Discover available ONNX models
+    datasets_with_models: dict[str, list[tuple[str, str]]] = {}
     for dataset_name in sorted(coco_by_name.keys()):
-        for variant in YOLOLITE_VARIANTS:
-            onnx = _onnx_path(dataset_name, variant)
+        for variant in VARIANT_NAMES:
+            onnx = _onnx_path(onnx_dir, dataset_name, variant)
             if os.path.isfile(onnx):
                 datasets_with_models.setdefault(dataset_name, []).append((variant, onnx))
 
@@ -196,19 +184,16 @@ def main():
     print(f"{'='*70}\n")
 
     if not datasets_with_models:
-        print("ERROR: No ONNX models found. Run train_and_export.py first.")
+        print("ERROR: No ONNX models found. Run train_rf100vl first.")
         sys.exit(1)
 
     # 3. Load existing partial results for resume
-    completed = set()
-    variant_rows: dict[str, list[dict]] = {v: [] for v in YOLOLITE_VARIANTS}
-    for variant in YOLOLITE_VARIANTS:
-        csv_path = _variant_csv(variant)
-        if os.path.isfile(csv_path):
-            existing = pd.read_csv(csv_path)
-            variant_rows[variant] = existing.to_dict("records")
-            for r in variant_rows[variant]:
-                completed.add((r["dataset"], r["variant"], r["runtime"]))
+    variant_rows: dict[str, list[dict]] = {v: [] for v in VARIANT_NAMES}
+    for variant in VARIANT_NAMES:
+        variant_rows[variant] = load_variant_csv(_variant_csv(sab_dir, variant))
+    completed = build_completed_set(
+        variant_rows, key_fields=("dataset", "variant", "runtime"),
+    )
 
     if completed:
         print(f"Resuming: {len(completed)} benchmark runs already completed.\n")
@@ -216,7 +201,7 @@ def main():
     done_count = len(completed)
     total = total_models * 3  # 3 engines per (variant, dataset)
 
-    # 4. Iterate datasets first, then variants within each dataset
+    # 4. Iterate datasets, then variants
     for dataset_name, variant_onnx_list in list(datasets_with_models.items()):
         coco_dir = coco_by_name.get(dataset_name)
         if coco_dir is None:
@@ -230,7 +215,6 @@ def main():
 
         image_dir, annotations_path = test_info
 
-        # Filter to variants that still need work
         pending = [
             (variant, onnx_path) for variant, onnx_path in variant_onnx_list
             if not all(
@@ -242,9 +226,9 @@ def main():
         if not pending:
             continue
 
-        print(f"\n{'─'*70}")
+        print(f"\n{'---'*23}")
         print(f"[{dataset_name}] {len(pending)} variants remaining")
-        print(f"{'─'*70}")
+        print(f"{'---'*23}")
 
         for variant, onnx_path in pending:
             already_done = {
@@ -254,13 +238,13 @@ def main():
             if len(already_done) == 3:
                 continue
 
-            print(f"\n  Benchmarking {dataset_name} / {variant} …")
+            print(f"\n  Benchmarking {dataset_name} / {variant} ...")
 
             rows = benchmark_single(
                 variant, dataset_name, onnx_path, image_dir, annotations_path
             )
 
-            variant_csv = _variant_csv(variant)
+            variant_csv = _variant_csv(sab_dir, variant)
             for row in rows:
                 if row.get("runtime") not in already_done:
                     variant_rows[variant].append(row)
@@ -274,22 +258,16 @@ def main():
                     else:
                         print(f"    [{done_count}/{total}] {row['runtime']}  FAIL: {row['error']}")
 
-            # Save per-variant CSV incrementally
-            pd.DataFrame(variant_rows[variant]).to_csv(variant_csv, index=False)
-
-        sync_results_to_gcs()
+            save_variant_csv(variant_rows[variant], variant_csv)
 
     # 5. Combined output
     all_rows = [r for rows in variant_rows.values() for r in rows]
     df = pd.DataFrame(all_rows)
-    combined_csv = os.path.join(SAB_DIR, "bench_results_combined.csv")
+    combined_csv = os.path.join(sab_dir, "bench_results_combined.csv")
     df.to_csv(combined_csv, index=False)
-
-    sync_results_to_gcs()
 
     print(f"\nBenchmarking complete.")
     print(f"  Combined CSV: {combined_csv}")
-    print(f"  GCS:          {GCS_BUCKET}/")
 
 
 if __name__ == "__main__":
