@@ -187,11 +187,12 @@ def run_single_training(
     variant_name: str,
     dataset_dir: str,
     device: str = "0",
+    max_concurrent: int = 1,
 ) -> dict:
     """Train one yololite variant on COCO, then export to ONNX."""
     import torch
 
-    torch.set_num_threads(os.cpu_count() or 1)
+    torch.set_num_threads(max(1, os.cpu_count() // max_concurrent))
 
     from yololite.scripts.args.build_args import load_configs
     from yololite.tools.train import run_training
@@ -251,15 +252,19 @@ def run_single_training(
 
 # ── Pool management ──────────────────────────────────────────────────────────
 
-def _pool_initializer(gpu_id: int) -> None:
-    """Restrict this worker to a single GPU."""
+def _pool_initializer(gpu_queue: multiprocessing.Queue, max_workers: int) -> None:
+    """Restrict this worker to a single GPU and cap CPU threads."""
+    gpu_id = gpu_queue.get()
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    threads = str(max(1, os.cpu_count() // max_workers))
+    os.environ["OMP_NUM_THREADS"] = threads
+    os.environ["MKL_NUM_THREADS"] = threads
 
 
 def _worker(args: tuple) -> dict:
-    variant_name, dataset_dir = args
+    variant_name, dataset_dir, max_concurrent = args
     try:
-        return run_single_training(variant_name, dataset_dir, "0")
+        return run_single_training(variant_name, dataset_dir, "0", max_concurrent)
     except Exception as e:
         traceback.print_exc()
         return {
@@ -328,7 +333,7 @@ def main():
             print(f"[{variant}] Starting COCO training")
             print(f"{'─'*70}")
 
-            result = _worker((variant, dataset_dir))
+            result = _worker((variant, dataset_dir, 1))
             results[variant] = result
 
             status = "OK" if result.get("error") is None else f"FAIL: {result['error']}"
@@ -351,12 +356,12 @@ def main():
             max_workers=num_gpus,
             mp_context=_SPAWN_CTX,
             initializer=_pool_initializer,
-            initargs=(gpu_queue.get(),),
+            initargs=(gpu_queue, num_gpus),
         )
 
         try:
             futures = {
-                pool.submit(_worker, (variant, dataset_dir)): variant
+                pool.submit(_worker, (variant, dataset_dir, num_gpus)): variant
                 for variant in pending
             }
 
