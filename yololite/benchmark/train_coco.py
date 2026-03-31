@@ -15,15 +15,14 @@ import os
 import sys
 import time
 import traceback
-import zipfile
-from urllib.request import urlopen, urlretrieve
+from pathlib import Path
 
 import pandas as pd
-import yaml
 
 # NOTE: torch is intentionally NOT imported at module level.
 
 from yololite.benchmark._io import (
+    find_data_yaml,
     load_training_config,
     load_variant_csv,
     save_variant_csv,
@@ -37,105 +36,43 @@ DEFAULT_EPOCHS = 300
 DEFAULT_BATCH_SIZE = 16
 JOBS_PER_GPU = 2
 
-# ── COCO download URLs ──────────────────────────────────────────────────────
-COCO_TRAIN_IMAGES_URL = "http://images.cocodataset.org/zips/train2017.zip"
-COCO_VAL_IMAGES_URL = "http://images.cocodataset.org/zips/val2017.zip"
-COCO_LABELS_URL = (
-    "https://github.com/ultralytics/assets/releases/download/v0.0.0/"
-    "coco2017labels-segments.zip"
-)
-COCO_YAML_URL = (
-    "https://raw.githubusercontent.com/ultralytics/ultralytics/main/"
-    "ultralytics/cfg/datasets/coco.yaml"
-)
+ROBOFLOW_WORKSPACE = "microsoft"
+ROBOFLOW_PROJECT = "coco"
+ROBOFLOW_VERSION = 9
+DATASETS_FORMAT = "yolov8"
 
 
 # ── COCO download ───────────────────────────────────────────────────────────
 
-def _download_and_extract(url: str, dest_dir: str) -> None:
-    """Download a zip file and extract it into *dest_dir*."""
-    os.makedirs(dest_dir, exist_ok=True)
-    zip_name = url.rsplit("/", 1)[-1]
-    zip_path = os.path.join(dest_dir, zip_name)
-
-    if not os.path.isfile(zip_path):
-        print(f"  Downloading {zip_name} ...")
-        urlretrieve(url, zip_path)
-    else:
-        print(f"  {zip_name} already downloaded, skipping.")
-
-    print(f"  Extracting {zip_name} ...")
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(dest_dir)
-
-
-def _fetch_coco_class_names() -> list[str]:
-    """Fetch canonical 80-class COCO names from the ultralytics YAML."""
-    with urlopen(COCO_YAML_URL) as resp:
-        data = yaml.safe_load(resp.read())
-    names = data.get("names", {})
-    if isinstance(names, dict):
-        return [names[k] for k in sorted(names.keys())]
-    return list(names)
-
-
 def download_coco(datasets_dir: str) -> str:
-    """Download COCO 2017 train/val and return the dataset directory."""
+    """Download COCO via Roboflow API in yolov8 format and return the dataset directory."""
+    from roboflow import Roboflow
+
     print(f"\n{'='*70}")
-    print("Downloading COCO 2017 dataset ...")
+    print("Downloading COCO dataset via Roboflow API ...")
+    print(f"  workspace: {ROBOFLOW_WORKSPACE}")
+    print(f"  project:   {ROBOFLOW_PROJECT}")
+    print(f"  version:   {ROBOFLOW_VERSION}")
+    print(f"  format:    {DATASETS_FORMAT}")
     print(f"  destination: {datasets_dir}")
     print(f"{'='*70}\n")
 
-    images_dir = os.path.join(datasets_dir, "images")
-    labels_dir = os.path.join(datasets_dir, "labels")
+    # Check if already downloaded (data.yaml present)
+    try:
+        data_yaml = find_data_yaml(datasets_dir)
+        print(f"Dataset already present at {datasets_dir}, skipping download.")
+        return str(Path(data_yaml).parent)
+    except FileNotFoundError:
+        pass
 
-    # Train images
-    if not os.path.isdir(os.path.join(images_dir, "train2017")):
-        _download_and_extract(COCO_TRAIN_IMAGES_URL, images_dir)
-    else:
-        print("  train2017 images already present, skipping.")
+    rf = Roboflow()
+    project = rf.workspace(ROBOFLOW_WORKSPACE).project(ROBOFLOW_PROJECT)
+    version = project.version(ROBOFLOW_VERSION)
+    dataset = version.download(DATASETS_FORMAT, location=datasets_dir, overwrite=False)
 
-    # Val images
-    if not os.path.isdir(os.path.join(images_dir, "val2017")):
-        _download_and_extract(COCO_VAL_IMAGES_URL, images_dir)
-    else:
-        print("  val2017 images already present, skipping.")
-
-    # YOLO-format labels
-    if not (
-        os.path.isdir(os.path.join(labels_dir, "train2017"))
-        and os.path.isdir(os.path.join(labels_dir, "val2017"))
-    ):
-        _download_and_extract(COCO_LABELS_URL, datasets_dir)
-        # The zip extracts to coco/labels/ — move if needed
-        nested = os.path.join(datasets_dir, "coco", "labels")
-        if os.path.isdir(nested) and not os.path.isdir(labels_dir):
-            os.rename(nested, labels_dir)
-    else:
-        print("  YOLO labels already present, skipping.")
-
-    # data.yaml
-    data_yaml_path = os.path.join(datasets_dir, "data.yaml")
-    if not os.path.isfile(data_yaml_path):
-        names = _fetch_coco_class_names()
-        data = {
-            "train": os.path.abspath(os.path.join(images_dir, "train2017")),
-            "val": os.path.abspath(os.path.join(images_dir, "val2017")),
-            "labels": {
-                "train": os.path.abspath(os.path.join(labels_dir, "train2017")),
-                "val": os.path.abspath(os.path.join(labels_dir, "val2017")),
-            },
-            "nc": len(names),
-            "names": names,
-        }
-        with open(data_yaml_path, "w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-        print(f"  Created {data_yaml_path} ({len(names)} classes)")
-    else:
-        print(f"  {data_yaml_path} already exists, skipping.")
-
-    print(f"\nCOCO dataset ready at: {datasets_dir}")
-    return datasets_dir
+    dataset_dir = dataset.location
+    print(f"\nCOCO dataset ready at: {dataset_dir}")
+    return dataset_dir
 
 
 # ── Training ─────────────────────────────────────────────────────────────────
@@ -156,7 +93,7 @@ def run_single_training(
     from yololite.export.export_onnx import export_decoded_onnx
     from yololite.tools.train import run_training
 
-    data_yaml = os.path.join(dataset_dir, "data.yaml")
+    data_yaml = find_data_yaml(dataset_dir)
     log_dir = os.path.join(results_dir, "runs", variant_name)
     os.makedirs(log_dir, exist_ok=True)
 
@@ -169,6 +106,7 @@ def run_single_training(
         img_size=IMG_SIZE,
         device=device,
         save_every=50,
+        num_workers=max(1, NUM_CPUS // max_concurrent),
     )
 
     # ── Train ──
