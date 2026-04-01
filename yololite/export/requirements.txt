@@ -1,3 +1,11 @@
 onnx>=1.17.0
 onnxruntime>=1.15.1
 onnx-simplifier>=0.4.36
+onnxscript>=0.1.0
+
+# tfjs export
+onnx2tf>=1.28.2
+tensorflowjs>=4.22.0
+
+# coreml export
+coremltools>=9.0
