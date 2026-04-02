@@ -31,8 +31,6 @@ class YOLOLiteCoreML(nn.Module):
         Number of object classes.
     center_mode / wh_mode:
         Decoding parameters forwarded to ``AFDecode``.
-    top_k:
-        Maximum number of detections to return.
     """
 
     def __init__(
@@ -42,14 +40,12 @@ class YOLOLiteCoreML(nn.Module):
         num_classes: int,
         center_mode: str = "v8",
         wh_mode: str = "softplus",
-        top_k: int = 300,
     ):
         super().__init__()
         self.model = model
         self.decode = AFDecode(img_size=img_size, center_mode=center_mode, wh_mode=wh_mode)
         self.img_size = img_size
         self.num_classes = num_classes
-        self.top_k = top_k
 
         # ImageNet normalisation buffers (NCHW broadcasting shape)
         self.register_buffer(
@@ -70,9 +66,9 @@ class YOLOLiteCoreML(nn.Module):
 
         Returns
         -------
-        boxes  : Tensor [1, K, 4]  -- cxcywh normalised
-        scores : Tensor [1, K]     -- confidence
-        labels : Tensor [1, K]     -- class indices (int64)
+        boxes  : Tensor [1, N, 4]  -- cxcywh normalised
+        scores : Tensor [1, N]     -- confidence (sigmoid(obj) * sigmoid(max_cls))
+        labels : Tensor [1, N]     -- class indices (int64)
         """
         # --- Preprocessing ---
         x = x / 255.0
@@ -91,27 +87,20 @@ class YOLOLiteCoreML(nn.Module):
         cls_max, cls_idx = cls_prob.max(dim=-1)        # [B, N], [B, N]
         confidence = obj_conf.squeeze(-1) * cls_max    # [B, N]
 
-        # Top-K selection
-        k = min(self.top_k, confidence.shape[-1])
-        topk_scores, topk_indices = torch.topk(confidence, k, dim=-1)  # [B, K]
-
-        # Gather boxes and labels
-        topk_indices_exp = topk_indices.unsqueeze(-1).expand(-1, -1, 4)  # [B, K, 4]
-        topk_boxes = torch.gather(boxes_xyxy, 1, topk_indices_exp)      # [B, K, 4]
-        topk_labels = torch.gather(cls_idx, 1, topk_indices)            # [B, K]
-
         # Convert xyxy pixel coords to normalised cxcywh
-        x1 = topk_boxes[..., 0]
-        y1 = topk_boxes[..., 1]
-        x2 = topk_boxes[..., 2]
-        y2 = topk_boxes[..., 3]
-        cx = (x1 + x2) / (2.0 * self.img_size)
-        cy = (y1 + y2) / (2.0 * self.img_size)
-        w = (x2 - x1) / float(self.img_size)
-        h = (y2 - y1) / float(self.img_size)
-        boxes_cxcywh = torch.stack([cx, cy, w, h], dim=-1)  # [B, K, 4]
+        img = float(self.img_size)
+        x1 = boxes_xyxy[..., 0]
+        y1 = boxes_xyxy[..., 1]
+        x2 = boxes_xyxy[..., 2]
+        y2 = boxes_xyxy[..., 3]
+        boxes_cxcywh = torch.stack([
+            (x1 + x2) / (2.0 * img),
+            (y1 + y2) / (2.0 * img),
+            (x2 - x1) / img,
+            (y2 - y1) / img,
+        ], dim=-1)  # [B, N, 4]
 
-        return boxes_cxcywh, topk_scores, topk_labels
+        return boxes_cxcywh, confidence, cls_idx
 
 
 def export_coreml(
