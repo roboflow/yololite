@@ -107,8 +107,8 @@ class YOLOLiteCoreML(nn.Module):
         y2 = topk_boxes[..., 3]
         cx = (x1 + x2) / (2.0 * self.img_size)
         cy = (y1 + y2) / (2.0 * self.img_size)
-        w = (x2 - x1) / self.img_size
-        h = (y2 - y1) / self.img_size
+        w = (x2 - x1) / float(self.img_size)
+        h = (y2 - y1) / float(self.img_size)
         boxes_cxcywh = torch.stack([cx, cy, w, h], dim=-1)  # [B, K, 4]
 
         return boxes_cxcywh, topk_scores, topk_labels
