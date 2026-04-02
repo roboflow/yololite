@@ -32,8 +32,8 @@ from yololite.benchmark._variants import YOLOLITE_VARIANTS
 
 # ── Constants ────────────────────────────────────────────────────────────────
 IMG_SIZE = 640
-DEFAULT_EPOCHS = 300
-DEFAULT_BATCH_SIZE = 16
+DEFAULT_EPOCHS = 30
+DEFAULT_BATCH_SIZE = 8
 JOBS_PER_GPU = 2
 
 ROBOFLOW_WORKSPACE = "microsoft"
