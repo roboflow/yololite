@@ -171,6 +171,7 @@ def export_coreml(
         ],
         minimum_deployment_target=ct.target.iOS16,
         convert_to="mlprogram",
+        compute_precision=ct.precision.FLOAT32,
     )
     logger.info("✅ CoreML conversion complete")
 
