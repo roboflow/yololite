@@ -292,7 +292,7 @@ def main():
                         help="Results directory containing sab/ CSVs")
     args = parser.parse_args()
 
-    out_dir = os.path.join(args.results_dir, "plots")
+    out_dir = os.path.join(args.results_dir, "sab")
     os.makedirs(out_dir, exist_ok=True)
 
     df = _load_sab_data(args.results_dir)
