@@ -387,12 +387,9 @@ def export_tfjs(
 
     _ensure_calibration_data()
 
-    # Read num_classes from checkpoint
     import torch
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
-    meta = ckpt.get("meta", {})
-    cfg = meta.get("config", {}) or {}
-    num_classes = int(meta.get("num_classes") or cfg.get("model", {}).get("num_classes", 80))
+    meta = torch.load(checkpoint_path, map_location="cpu").get("meta", {})
+    num_classes = int(meta.get("num_classes", 80))
 
     with tempfile.TemporaryDirectory(prefix="yololite_tfjs_") as tmp:
         # Step 1: Export raw NCHW heads ONNX

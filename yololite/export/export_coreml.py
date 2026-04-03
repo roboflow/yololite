@@ -142,26 +142,20 @@ def _build_nms_pipeline(det_model, class_names, num_detections, num_classes,
     for name in class_names:
         nms.stringClassLabels.vector.append(name)
 
-    # NMS inputs: coordinates [N, 4], confidence [N, C], thresholds
-    for feat_name, shape in det_outputs:
-        inp = nms_spec.description.input.add()
-        inp.name = feat_name
-        inp.type.multiArrayType.dataType = _DTYPE
-        for s in shape:
-            inp.type.multiArrayType.shape.append(s)
+    def _add_array_features(desc_list, features):
+        for feat_name, shape in features:
+            feat = desc_list.add()
+            feat.name = feat_name
+            feat.type.multiArrayType.dataType = _DTYPE
+            for s in shape:
+                feat.type.multiArrayType.shape.append(s)
 
+    _add_array_features(nms_spec.description.input, det_outputs)
     for feat_name in ["iouThreshold", "confidenceThreshold"]:
         inp = nms_spec.description.input.add()
         inp.name = feat_name
         inp.type.doubleType.MergeFromString(b"")
-
-    # NMS outputs: same shapes (suppressed entries zeroed)
-    for feat_name, shape in det_outputs:
-        out = nms_spec.description.output.add()
-        out.name = feat_name
-        out.type.multiArrayType.dataType = _DTYPE
-        for s in shape:
-            out.type.multiArrayType.shape.append(s)
+    _add_array_features(nms_spec.description.output, det_outputs)
 
     # --- Pipeline spec ---
     pipeline_spec = Model_pb2.Model()
