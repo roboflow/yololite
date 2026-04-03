@@ -15,13 +15,10 @@ YOLOLITE_VARIANTS: dict[str, tuple[str, str, int]] = {
     "yololite-edge-xl": ("models",    "edge_xl.yaml",     1),   # ~52 GB peak
 }
 
-# Display ordering (small → large)
+# Display ordering (edge first, then standard; small → large within each group)
 VARIANT_ORDER: list[str] = [
-    "yololite-n", "yololite-edge-n",
-    "yololite-s", "yololite-edge-s",
-    "yololite-m", "yololite-edge-m",
-    "yololite-l", "yololite-edge-l",
-    "yololite-xl", "yololite-edge-xl",
+    "yololite-edge-n", "yololite-edge-s", "yololite-edge-m", "yololite-edge-l", "yololite-edge-xl",
+    "yololite-n", "yololite-s", "yololite-m", "yololite-l", "yololite-xl",
 ]
 
 VARIANT_NAMES: list[str] = list(YOLOLITE_VARIANTS.keys())
