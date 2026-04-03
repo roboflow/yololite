@@ -107,6 +107,7 @@ def run_single_training(
         device=device,
         save_every=50,
         num_workers=max(1, NUM_CPUS // max_concurrent),
+        warmup_epochs=5,
     )
 
     # ── Train ──

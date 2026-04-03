@@ -58,6 +58,7 @@ def load_training_config(
     save_every: int | None = None,
     save_by: str = "AP",
     num_workers: int | None = None,
+    warmup_epochs: int | None = None,
     resume: str | None = None,
 ) -> dict:
     """Build a fully configured training config dict for a variant.
@@ -93,6 +94,8 @@ def load_training_config(
         config["training"]["save_every"] = save_every
     if num_workers is not None:
         config["training"]["num_workers"] = num_workers
+    if warmup_epochs is not None:
+        config["training"]["warmup_epochs"] = warmup_epochs
     if resume is not None:
         config["training"]["resume"] = resume
 

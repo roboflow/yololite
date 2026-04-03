@@ -408,9 +408,10 @@ def run_training(config: dict, callbacks=None) -> dict:
     Precision_fixed, Recall_fixed, F1_fixed = [], [], []
 
     warmup_epochs = int(config["training"].get("warmup_epochs", 0))
+    warmup_base_lrs = [pg["lr"] for pg in optimizer.param_groups]
     if warmup_epochs > 0 and sched_type != "onecycle" and start_epoch == 0:
         for pg in optimizer.param_groups:
-            pg["lr"] = base_lr * 0.1
+            pg["lr"] = pg["lr"] * 0.1
 
     # Define save by
     save_by = config["training"]["save_by"]
@@ -494,8 +495,8 @@ def run_training(config: dict, callbacks=None) -> dict:
             pass
         elif warmup_epochs > 0 and epoch < warmup_epochs and sched_type != "reduceonplat":
             w = (epoch + 1) / warmup_epochs
-            for pg in optimizer.param_groups:
-                pg["lr"] = base_lr * (0.1 + 0.9 * w)
+            for pg, blr in zip(optimizer.param_groups, warmup_base_lrs):
+                pg["lr"] = blr * (0.1 + 0.9 * w)
         elif scheduler is not None and sched_type not in ("reduceonplat", "onecycle"):
             scheduler.step()
 
