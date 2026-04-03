@@ -5,11 +5,13 @@ Pipeline:
     2. onnx2tf -> TF SavedModel  (backbone/FPN/heads are standard conv ops)
     3. Wrap SavedModel with TF decode layer (meshgrid + box math + concat)
     4. Validate wrapped model vs decoded ONNX
-    5. TF SavedModel -> TFJS
+    5. Wrap decoded model with NMS (tf.image.non_max_suppression)
+    6. TF SavedModel -> TFJS
 
 The decode is implemented in pure TF ops in the wrapper — never processed
 by onnx2tf — avoiding its buggy NCW->NWC transposition on non-spatial
-tensors entirely.
+tensors entirely.  NMS is applied after decode so the TFJS model outputs
+filtered detections directly.
 """
 
 import argparse
@@ -222,6 +224,77 @@ def _wrap_with_decode(tf_model_dir: str, wrapped_dir: str,
     logger.info("Wrapped SavedModel with decode at %s", wrapped_dir)
 
 
+def _wrap_with_nms(decoded_dir: str, nms_dir: str, img_size: int,
+                   max_detections: int = 100) -> None:
+    """Wrap a decoded SavedModel with NMS post-processing.
+
+    Takes the decode wrapper outputs (boxes_xyxy, obj_logits, cls_logits)
+    and applies sigmoid, confidence scoring, and tf.image.non_max_suppression.
+
+    Outputs:
+        boxes:   [M, 4]  -- xyxy pixel coordinates of kept detections
+        scores:  [M]     -- confidence scores
+        classes: [M]     -- class indices (int32)
+    where M <= max_detections is variable.
+    """
+    import tensorflow as tf
+
+    inner = tf.saved_model.load(decoded_dir)
+    inner_fn = inner.signatures["serving_default"]
+    input_spec = list(inner_fn.structured_input_signature[1].values())[0]
+
+    _img_size = float(img_size)
+    _max_det = max_detections
+
+    class NMSWrapper(tf.Module):
+        def __init__(self):
+            super().__init__()
+            self._inner_fn = inner_fn
+
+        @tf.function(input_signature=[
+            input_spec,
+            tf.TensorSpec([], tf.float32, name="iou_threshold"),
+            tf.TensorSpec([], tf.float32, name="score_threshold"),
+        ])
+        def serve(self, images, iou_threshold, score_threshold):
+            results = self._inner_fn(images=images)
+            boxes_xyxy = results["boxes_xyxy"]    # [B, N, 4]
+            obj_logits = results["obj_logits"]    # [B, N, 1]
+            cls_logits = results["cls_logits"]    # [B, N, C]
+
+            # Sigmoid + confidence (batch dim squeezed — single image)
+            obj_conf = tf.sigmoid(tf.squeeze(obj_logits[0], axis=-1))  # [N]
+            cls_prob = tf.sigmoid(cls_logits[0])                       # [N, C]
+            cls_max = tf.reduce_max(cls_prob, axis=-1)                 # [N]
+            confidence = obj_conf * cls_max                            # [N]
+            class_indices = tf.cast(tf.argmax(cls_prob, axis=-1), tf.int32)  # [N]
+
+            # NMS expects [y1, x1, y2, x2] normalised — convert from xyxy pixel
+            raw_boxes = boxes_xyxy[0]  # [N, 4] as x1,y1,x2,y2
+            x1, y1, x2, y2 = (raw_boxes[:, i] for i in range(4))
+            nms_boxes = tf.stack([y1, x1, y2, x2], axis=-1) / _img_size
+
+            selected = tf.image.non_max_suppression(
+                nms_boxes, confidence,
+                max_output_size=_max_det,
+                iou_threshold=iou_threshold,
+                score_threshold=score_threshold,
+            )
+
+            return {
+                "boxes": tf.gather(raw_boxes, selected),
+                "scores": tf.gather(confidence, selected),
+                "classes": tf.gather(class_indices, selected),
+            }
+
+    wrapper = NMSWrapper()
+    tf.saved_model.save(
+        wrapper, nms_dir,
+        signatures={"serving_default": wrapper.serve},
+    )
+    logger.info("Wrapped decoded model with NMS at %s", nms_dir)
+
+
 def _validate_against_onnx(decoded_onnx_path: str, tf_model_dir: str) -> None:
     """Compare decoded ONNX vs wrapped TF SavedModel outputs."""
     import numpy as np
@@ -276,15 +349,15 @@ def export_tfjs(
     shard_size_bytes: int = 1_048_576,
     center_mode: str = "v8",
     wh_mode: str = "softplus",
+    max_detections: int = 100,
 ) -> str:
     """Convert a yololite checkpoint to TensorFlow.js graph model format.
 
     Exports a raw NCHW-heads ONNX (standard conv ops only), converts via
-    onnx2tf, then wraps the TF SavedModel with a decode layer (pure TF
-    ops).  The resulting TFJS model outputs decoded boxes/obj/cls — no
-    client-side post-processing needed.
-
-    FPN strides and num_classes are read from the checkpoint automatically.
+    onnx2tf, wraps with a TF decode layer, validates against decoded ONNX,
+    then adds NMS.  The resulting TFJS model outputs filtered detections
+    (boxes, scores, classes) with NMS thresholds configurable at runtime
+    via model inputs (iou_threshold, score_threshold scalars).
 
     Parameters
     ----------
@@ -300,6 +373,8 @@ def export_tfjs(
         Maximum weight shard file size in bytes.
     center_mode / wh_mode:
         Decoding parameters forwarded to the TF decode wrapper.
+    max_detections:
+        Maximum number of detections after NMS.
     """
     out_dir = str(Path(out_dir).resolve())
 
@@ -322,7 +397,7 @@ def export_tfjs(
     with tempfile.TemporaryDirectory(prefix="yololite_tfjs_") as tmp:
         # Step 1: Export raw NCHW heads ONNX
         raw_onnx = str(Path(tmp) / "heads_nchw.onnx")
-        logger.info("Step 1/5: Exporting NCHW heads ONNX...")
+        logger.info("Step 1/6: Exporting NCHW heads ONNX...")
         _export_nchw_heads_onnx(checkpoint_path, img_size, raw_onnx)
         try:
             import onnx, onnxsim
@@ -336,7 +411,7 @@ def export_tfjs(
 
         # Step 2: Convert ONNX to TF SavedModel
         tf_model_dir = str(Path(tmp) / "tf_savedmodel")
-        logger.info("Step 2/5: Converting ONNX to TensorFlow SavedModel...")
+        logger.info("Step 2/6: Converting ONNX to TensorFlow SavedModel...")
         onnx2tf.convert(
             input_onnx_file_path=raw_onnx,
             output_folder_path=tf_model_dir,
@@ -353,7 +428,7 @@ def export_tfjs(
 
         # Step 3: Wrap with TF decode layer
         wrapped_dir = str(Path(tmp) / "tf_decoded")
-        logger.info("Step 3/5: Wrapping SavedModel with decode layer...")
+        logger.info("Step 3/6: Wrapping SavedModel with decode layer...")
         _wrap_with_decode(
             tf_model_dir, wrapped_dir, img_size, num_classes,
             center_mode, wh_mode,
@@ -361,7 +436,7 @@ def export_tfjs(
         logger.info("✅ Decode wrapper applied")
 
         # Step 4: Validate against decoded ONNX
-        logger.info("Step 4/5: Validating wrapped model vs decoded ONNX...")
+        logger.info("Step 4/6: Validating wrapped model vs decoded ONNX...")
         decoded_onnx = str(Path(tmp) / "decoded.onnx")
         export_decoded_onnx(
             checkpoint_path=checkpoint_path, img_size=img_size,
@@ -370,10 +445,17 @@ def export_tfjs(
         _validate_against_onnx(decoded_onnx, wrapped_dir)
         logger.info("✅ Validation passed")
 
-        # Step 5: Convert to TensorFlow.js
-        logger.info("Step 5/5: Converting SavedModel to TensorFlow.js...")
+        # Step 5: Wrap with NMS
+        nms_dir = str(Path(tmp) / "tf_nms")
+        logger.info("Step 5/6: Adding NMS (max=%d, thresholds configurable at runtime)...",
+                     max_detections)
+        _wrap_with_nms(wrapped_dir, nms_dir, img_size, max_detections=max_detections)
+        logger.info("✅ NMS wrapper applied")
+
+        # Step 6: Convert to TensorFlow.js
+        logger.info("Step 6/6: Converting SavedModel to TensorFlow.js...")
         convert_tf_saved_model(
-            wrapped_dir,
+            nms_dir,
             out_dir,
             signature_def="serving_default",
             saved_model_tags="serve",
