@@ -225,7 +225,7 @@ def _wrap_with_decode(tf_model_dir: str, wrapped_dir: str,
 
 
 def _wrap_with_nms(decoded_dir: str, nms_dir: str, img_size: int,
-                   max_detections: int = 100) -> None:
+                   max_detections: int = 500) -> None:
     """Wrap a decoded SavedModel with NMS post-processing.
 
     Takes the decode wrapper outputs (boxes_xyxy, obj_logits, cls_logits)
@@ -349,7 +349,7 @@ def export_tfjs(
     shard_size_bytes: int = 1_048_576,
     center_mode: str = "v8",
     wh_mode: str = "softplus",
-    max_detections: int = 100,
+    max_detections: int = 500,
 ) -> str:
     """Convert a yololite checkpoint to TensorFlow.js graph model format.
 
