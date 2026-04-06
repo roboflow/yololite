@@ -45,17 +45,22 @@ DEFAULT_BATCH_SIZE = 16
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def download_datasets(datasets_dir: str) -> list[str]:
-    """Download all RF100-VL datasets in yolov8 format and return directory list."""
-    from rf100vl import download_rf100vl
+def download_datasets(datasets_dir: str, rf20: bool = False) -> list[str]:
+    """Download RF100-VL (or RF20-VL subset) datasets in yolov8 format."""
+    if rf20:
+        from rf100vl import download_rf20vl_full as _download
+        label = "RF20-VL"
+    else:
+        from rf100vl import download_rf100vl as _download
+        label = "RF100-VL"
 
     print(f"\n{'='*70}")
-    print("Downloading RF100-VL datasets ...")
+    print(f"Downloading {label} datasets ...")
     print(f"  destination: {datasets_dir}")
     print(f"  format:      {DATASETS_FORMAT}")
     print(f"{'='*70}\n")
 
-    download_rf100vl(
+    _download(
         path=datasets_dir,
         model_format=DATASETS_FORMAT,
         overwrite=False,
@@ -234,6 +239,10 @@ def main():
         default=None,
         help="Results directory with pre-trained checkpoints (e.g. coco_benchmark_results)",
     )
+    parser.add_argument(
+        "--rf20", action="store_true",
+        help="Use RF20-VL (20 datasets) instead of full RF100-VL",
+    )
     args = parser.parse_args()
 
     results_dir = args.results_dir
@@ -243,7 +252,7 @@ def main():
     os.makedirs(onnx_dir, exist_ok=True)
 
     # 1. Download datasets
-    dataset_dirs = download_datasets(args.datasets_dir)
+    dataset_dirs = download_datasets(args.datasets_dir, rf20=args.rf20)
     if not dataset_dirs:
         print("ERROR: No datasets found after download. Check ROBOFLOW_API_KEY.")
         sys.exit(1)
