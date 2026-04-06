@@ -363,10 +363,19 @@ def run_training(config: dict, callbacks=None) -> dict:
     # Otherwise, weights-only warm-start (e.g. pretrained model with different classes).
     if config["training"]["resume"] is not None:
         ckpt = torch.load(config["training"]["resume"], map_location=DEVICE, weights_only=False)
-        if isinstance(ckpt, dict) and "state_dict" in ckpt:
-            missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
-        else:
-            missing, unexpected = model.load_state_dict(ckpt, strict=False)
+        ckpt_sd = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+        # Filter out keys whose shapes don't match (e.g. different num_classes).
+        # The skipped layers fall through to default init; detection heads are
+        # reinitialized below via init_detect_bias.
+        model_sd = model.state_dict()
+        filtered_sd = {
+            k: v for k, v in ckpt_sd.items()
+            if k in model_sd and v.shape == model_sd[k].shape
+        }
+        skipped = set(ckpt_sd.keys()) - set(filtered_sd.keys())
+        if skipped:
+            print(f"Skipped {len(skipped)} shape-mismatched keys: {sorted(skipped)}")
+        missing, unexpected = model.load_state_dict(filtered_sd, strict=False)
         print(f"Loaded checkpoint weights: missing={len(missing)}, unexpected={len(unexpected)}")
 
         ts = ckpt.get("training_state") if isinstance(ckpt, dict) else None
