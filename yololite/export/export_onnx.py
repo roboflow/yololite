@@ -8,6 +8,7 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.ops import nms
 
 # ========= sys.path & imports =========
 ROOT = os.getcwd()
@@ -175,7 +176,73 @@ def load_model_from_ckpt(weights: str, device: torch.device, verbose: bool) -> T
     return model, meta
 
 
-# ========= programmatic export helpers =========
+# ========= NMS wrapper for ONNX export =========
+class _NMSWrapper(nn.Module):
+    """Wraps a decoded model (backbone + AFDecode) with torchvision NMS.
+
+    Output is ``[B, max_det, 6]`` zero-padded, where each detection is
+    ``[x1, y1, x2, y2, confidence, class_id]``.  This traces cleanly into
+    ONNX via torchvision's NMS symbolic and preserves the batch dimension,
+    following the Ultralytics convention.
+    """
+
+    def __init__(self, model: nn.Module, decode: nn.Module,
+                 max_detections: int = 300,
+                 iou_threshold: float = 0.7,
+                 score_threshold: float = 0.25,
+                 batch_size: int = 1):
+        super().__init__()
+        self.model = model
+        self.decode = decode
+        self.max_det = max_detections
+        self.iou_threshold = iou_threshold
+        self.score_threshold = score_threshold
+        self.batch_size = batch_size
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        raw = self.model(x)
+        boxes_xyxy, obj_logits, cls_logits = self.decode(raw)
+        # boxes_xyxy: [B, N, 4], obj_logits: [B, N, 1], cls_logits: [B, N, C]
+
+        obj_conf = torch.sigmoid(obj_logits)          # [B, N, 1]
+        cls_prob = torch.sigmoid(cls_logits)           # [B, N, C]
+        cls_max, cls_idx = cls_prob.max(dim=-1)        # [B, N], [B, N]
+        confidence = obj_conf.squeeze(-1) * cls_max    # [B, N]
+
+        bs = x.shape[0]
+        kwargs = dict(device=x.device, dtype=x.dtype)
+
+        # Pad to traced batch size so unrolled loop indices are always valid at runtime
+        pad_n = self.batch_size - bs
+        if pad_n > 0:
+            pad_boxes = torch.zeros(pad_n, boxes_xyxy.shape[1], 4, **kwargs)
+            pad_conf = torch.zeros(pad_n, confidence.shape[1], **kwargs)
+            pad_cls = torch.zeros(pad_n, cls_idx.shape[1], device=x.device, dtype=cls_idx.dtype)
+            boxes_xyxy = torch.cat([boxes_xyxy, pad_boxes])
+            confidence = torch.cat([confidence, pad_conf])
+            cls_idx = torch.cat([cls_idx, pad_cls])
+
+        output = torch.zeros(self.batch_size, self.max_det, 6, **kwargs)
+
+        for i in range(bs):
+            score = confidence[i]
+            score = score * (score > self.score_threshold)
+            topk = score.topk(min(self.max_det * 5, score.shape[0])).indices
+            box = boxes_xyxy[i][topk]
+            score = score[topk]
+            cls = cls_idx[i][topk]
+
+            keep = nms(box, score, self.iou_threshold)[:self.max_det]
+            dets = torch.cat([
+                box[keep],
+                score[keep].unsqueeze(-1),
+                cls[keep].unsqueeze(-1).to(output.dtype),
+            ], dim=-1)
+            output[i] = F.pad(dets, (0, 0, 0, self.max_det - dets.shape[0]))
+
+        return output[:bs]
+
+
 def export_decoded_onnx(
     checkpoint_path: str,
     img_size: int,
@@ -183,6 +250,7 @@ def export_decoded_onnx(
     opset: int = 17,
     center_mode: str = "v8",
     wh_mode: str = "softplus",
+    dynamic_batch: bool = True,
 ) -> None:
     """Export a yololite checkpoint to a decoded ONNX file (no NMS).
 
@@ -198,6 +266,8 @@ def export_decoded_onnx(
         ONNX opset version (default 17).
     center_mode / wh_mode:
         Decoding parameters forwarded to ``AFDecode``.
+    dynamic_batch:
+        If True, export with a dynamic batch dimension.
     """
     device = torch.device("cpu")
     model, meta = load_model_from_ckpt(checkpoint_path, device=device, verbose=False)
@@ -213,6 +283,14 @@ def export_decoded_onnx(
 
     wrapper = _DecodedWrapper(model, img_size, center_mode, wh_mode).eval()
     dummy = torch.zeros(1, 3, img_size, img_size, device=device)
+    dynamic_axes = None
+    if dynamic_batch:
+        dynamic_axes = {
+            "images": {0: "batch"},
+            "boxes_xyxy": {0: "batch"},
+            "obj_logits": {0: "batch"},
+            "cls_logits": {0: "batch"},
+        }
     with torch.no_grad():
         torch.onnx.export(
             wrapper,
@@ -221,11 +299,52 @@ def export_decoded_onnx(
             opset_version=opset,
             input_names=["images"],
             output_names=["boxes_xyxy", "obj_logits", "cls_logits"],
+            dynamic_axes=dynamic_axes,
+            do_constant_folding=True,
+            external_data=False,
+        )
+
+
+def export_decoded_nms_onnx(
+    checkpoint_path: str,
+    img_size: int,
+    out_path: str,
+    opset: int = 17,
+    center_mode: str = "v8",
+    wh_mode: str = "softplus",
+    max_detections: int = 300,
+    iou_threshold: float = 0.7,
+    score_threshold: float = 0.25,
+    batch_size: int = 1,
+) -> None:
+    """Export a decoded ONNX with baked-in NMS via torchvision.ops.nms.
+
+    Output is ``[B, max_det, 6]`` zero-padded: ``[x1, y1, x2, y2, conf, class_id]``.
+    Batch dimension is preserved.  The per-batch NMS loop is unrolled at trace
+    time to ``batch_size`` iterations (following the Ultralytics convention).
+    """
+    device = torch.device("cpu")
+    model, _ = load_model_from_ckpt(checkpoint_path, device=device, verbose=False)
+
+    wrapper = _NMSWrapper(
+        model=model,
+        decode=AFDecode(img_size=img_size, center_mode=center_mode, wh_mode=wh_mode),
+        max_detections=max_detections,
+        iou_threshold=iou_threshold,
+        score_threshold=score_threshold,
+        batch_size=batch_size,
+    ).eval()
+
+    dummy = torch.zeros(batch_size, 3, img_size, img_size, device=device)
+    with torch.no_grad():
+        torch.onnx.export(
+            wrapper, dummy, out_path,
+            opset_version=opset,
+            input_names=["images"],
+            output_names=["output"],
             dynamic_axes={
                 "images": {0: "batch"},
-                "boxes_xyxy": {0: "batch"},
-                "obj_logits": {0: "batch"},
-                "cls_logits": {0: "batch"},
+                "output": {0: "batch"},
             },
             do_constant_folding=True,
             external_data=False,
@@ -327,6 +446,10 @@ def run_export(
     dynamic_shape: bool = False,
     center_mode: str = "v8",
     wh_mode: str = "softplus",
+    batch_size: int = 1,
+    max_detections: int = 300,
+    iou_threshold: float = 0.7,
+    score_threshold: float = 0.25,
     verbose: bool = False,
 ) -> str:
     """Export a yololite checkpoint to ONNX.
@@ -340,7 +463,8 @@ def run_export(
     img_size:
         Spatial resolution (H == W).  Overrides the value stored in the checkpoint.
     format:
-        ``"decoded"`` (boxes/obj/cls, no NMS) or ``"raw"`` (per-level head tensors).
+        ``"decoded"`` (boxes/obj/cls, no NMS), ``"decoded_nms"`` (decoded + NMS),
+        or ``"raw"`` (per-level head tensors).
     opset:
         ONNX opset version.
     device:
@@ -350,7 +474,7 @@ def run_export(
     simplify:
         Run ``onnxsim`` on the exported file.
     dynamic_batch:
-        Dynamic batch dimension (raw format; decoded is always dynamic).
+        Dynamic batch dimension (raw and decoded formats).
     dynamic_shape:
         Dynamic H/W dimensions (raw format only).
     center_mode / wh_mode:
@@ -386,7 +510,8 @@ def run_export(
         must("• Torrkörning OK: 1 utgång (monolitisk).")
 
     export_dir = next_run_dir("runs/export")
-    out_path = Path(out) if out else Path(export_dir) / ("model_decoded.onnx" if format == "decoded" else "model.onnx")
+    format_names = {"decoded": "model_decoded.onnx", "decoded_nms": "model_decoded_nms.onnx", "raw": "model.onnx"}
+    out_path = Path(out) if out else Path(export_dir) / format_names[format]
     must(f"• Export-katalog: {export_dir}")
     must(f"• Skriver: {out_path}")
 
@@ -406,6 +531,20 @@ def run_export(
                 verbose=verbose,
             )
             must("✓ ONNX export (raw) klar")
+        elif format == "decoded_nms":
+            export_decoded_nms_onnx(
+                checkpoint_path=weights,
+                img_size=resolved_size,
+                out_path=str(out_path),
+                opset=opset,
+                center_mode=center_mode,
+                wh_mode=wh_mode,
+                batch_size=batch_size,
+                max_detections=max_detections,
+                iou_threshold=iou_threshold,
+                score_threshold=score_threshold,
+            )
+            must("✓ ONNX export (decoded + NMS) klar")
         else:  # decoded
             if dynamic_shape:
                 must("! Ignorerar --dynamic-shape i decoded-läge (kräver fast img_size).")
@@ -416,6 +555,7 @@ def run_export(
                 opset=opset,
                 center_mode=center_mode,
                 wh_mode=wh_mode,
+                dynamic_batch=dynamic_batch,
             )
             must("✓ ONNX export (decoded) klar")
     except Exception as e:
@@ -450,8 +590,8 @@ def main():
     ap.add_argument("--simplify", action="store_true", help="onnxsim after export")
     ap.add_argument("--dynamic-batch", action="store_true", help="Dynamic batch-dimension (raw format)")
     ap.add_argument("--dynamic-shape", action="store_true", help="Dynamic H/W (raw format only)")
-    ap.add_argument("--format", choices=["raw", "decoded"], default="decoded",
-                    help="raw = raw data per nivå; decoded = boxes/obj/cls")
+    ap.add_argument("--format", choices=["raw", "decoded", "decoded_nms"], default="decoded_nms",
+                    help="raw = per-level heads; decoded = boxes/obj/cls; decoded_nms = decoded + NMS")
     ap.add_argument("--center-mode", default="v8", choices=["v8", "sigmoid"], help="Decode-center (decoded)")
     ap.add_argument("--wh-mode", default="softplus", choices=["softplus", "v8", "exp"], help="Decode-wh (decoded)")
     ap.add_argument("--verbose", action="store_true", help="Detailed logg")
