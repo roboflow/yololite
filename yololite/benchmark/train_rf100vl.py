@@ -143,47 +143,37 @@ def run_single_training(
     log_dir = os.path.join(results_dir, "runs", dataset_name, variant_name)
     os.makedirs(log_dir, exist_ok=True)
 
-    # Strip training_state from pretrained checkpoint so we get weights-only
-    resume_path = None
-    tmp_ckpt = None
-    if pretrained_path is not None:
-        tmp_ckpt = _strip_training_state(pretrained_path)
-        resume_path = tmp_ckpt
+    # pretrained_path is already stripped by the main process
+    config = load_training_config(
+        variant_name,
+        data_yaml,
+        log_dir,
+        epochs=epochs,
+        batch_size=batch_size,
+        img_size=IMG_SIZE,
+        device=device,
+        save_every=epochs + 1,  # no periodic saves
+        num_workers=max(1, NUM_CPUS // max_concurrent),
+        resume=pretrained_path,
+    )
 
-    try:
-        config = load_training_config(
-            variant_name,
-            data_yaml,
-            log_dir,
-            epochs=epochs,
-            batch_size=batch_size,
-            img_size=IMG_SIZE,
-            device=device,
-            save_every=epochs + 1,  # no periodic saves
-            num_workers=max(1, NUM_CPUS // max_concurrent),
-            resume=resume_path,
-        )
+    # ── Train ──
+    t0 = time.time()
+    train_result = run_training(config)
+    train_elapsed = time.time() - t0
 
-        # ── Train ──
-        t0 = time.time()
-        train_result = run_training(config)
-        train_elapsed = time.time() - t0
+    # ── Export to ONNX ──
+    best_ckpt = train_result["best_checkpoint"]
+    onnx_out = _onnx_path(onnx_dir, dataset_name, variant_name)
+    os.makedirs(os.path.dirname(onnx_out), exist_ok=True)
 
-        # ── Export to ONNX ──
-        best_ckpt = train_result["best_checkpoint"]
-        onnx_out = _onnx_path(onnx_dir, dataset_name, variant_name)
-        os.makedirs(os.path.dirname(onnx_out), exist_ok=True)
-
-        t1 = time.time()
-        export_decoded_onnx(
-            checkpoint_path=best_ckpt,
-            img_size=IMG_SIZE,
-            out_path=onnx_out,
-        )
-        export_elapsed = time.time() - t1
-    finally:
-        if tmp_ckpt is not None and os.path.isfile(tmp_ckpt):
-            os.unlink(tmp_ckpt)
+    t1 = time.time()
+    export_decoded_onnx(
+        checkpoint_path=best_ckpt,
+        img_size=IMG_SIZE,
+        out_path=onnx_out,
+    )
+    export_elapsed = time.time() - t1
 
     return {
         "dataset": dataset_name,
@@ -297,6 +287,12 @@ def main():
         max_concurrent = num_gpus * jobs_per_gpu
         pretrained_path = pretrained_weights.get(variant)
 
+        # Strip training_state once in the main process, share the
+        # stripped file across all workers for this variant.
+        stripped_path = None
+        if pretrained_path is not None:
+            stripped_path = _strip_training_state(pretrained_path)
+
         variant_jobs = []
         for ddir in dataset_dirs:
             dname = Path(ddir).name
@@ -306,7 +302,7 @@ def main():
                 continue
             variant_jobs.append((
                 variant, ddir, dname, results_dir, onnx_dir,
-                max_concurrent, args.epochs, args.batch_size, pretrained_path,
+                max_concurrent, args.epochs, args.batch_size, stripped_path,
             ))
 
         if not variant_jobs:
@@ -340,6 +336,10 @@ def main():
             variant_jobs, _worker, num_gpus, jobs_per_gpu,
             on_result=_on_result,
         )
+
+        # Clean up stripped checkpoint
+        if stripped_path is not None and os.path.isfile(stripped_path):
+            os.unlink(stripped_path)
 
     # 5. Summary
     all_rows = [r for rows in variant_rows.values() for r in rows]
