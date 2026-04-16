@@ -13,7 +13,9 @@ Produces per-variant CSVs: <results-dir>/sab/bench_results_{variant}.csv
 """
 
 import argparse
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -25,6 +27,10 @@ from yololite.benchmark._io import (
     save_variant_csv,
 )
 from yololite.benchmark._variants import VARIANT_NAMES
+
+RUNTIMES = ("ONNX-CPU", "TRT-fp32", "TRT-fp16")
+_RESULT_MARKER = "__SAB_RESULT__"
+MAX_DETS = 500
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -69,6 +75,68 @@ def _variant_csv(sab_dir: str, variant: str) -> str:
     return os.path.join(sab_dir, f"bench_results_{variant}.csv")
 
 
+def _run_one_engine_in_process(
+    runtime_name: str, fp16: bool, onnx_path: str, image_dir: str, annotations_path: str,
+) -> dict:
+    """Run a single benchmark in this process and return a result dict."""
+    from sab.models.benchmark_yololite import (
+        YoloLiteONNXCPUInference,
+        YoloLiteTRTInference,
+    )
+    from sab.models.utils import ArtifactBenchmarkRequest, run_benchmark_on_artifact
+
+    inference_class = (
+        YoloLiteONNXCPUInference if runtime_name == "ONNX-CPU" else YoloLiteTRTInference
+    )
+    request = ArtifactBenchmarkRequest(
+        onnx_path=onnx_path,
+        inference_class=inference_class,
+        needs_fp16=fp16,
+        max_dets=MAX_DETS,
+    )
+    accuracy_stats, latency_stats, throttled = run_benchmark_on_artifact(
+        request, image_dir, annotations_path
+    )
+    return {
+        "mAP50": accuracy_stats[1] if len(accuracy_stats) > 1 else None,
+        "mAP50_95": accuracy_stats[0] if len(accuracy_stats) > 0 else None,
+        "AP75": accuracy_stats[2] if len(accuracy_stats) > 2 else None,
+        "AP_s": accuracy_stats[3] if len(accuracy_stats) > 3 else None,
+        "AP_m": accuracy_stats[4] if len(accuracy_stats) > 4 else None,
+        "AP_l": accuracy_stats[5] if len(accuracy_stats) > 5 else None,
+        "AR_maxdets": accuracy_stats[8] if len(accuracy_stats) > 8 else None,
+        "latency_median_ms": latency_stats.get("median"),
+        "latency_p95_ms": latency_stats.get("p95"),
+        "throttled": throttled,
+    }
+
+
+def _run_one_engine_subprocess(
+    runtime_name: str, fp16: bool, onnx_path: str, image_dir: str, annotations_path: str,
+) -> dict:
+    """Spawn a subprocess to run one engine. Subprocess exit guarantees FD cleanup."""
+    cmd = [
+        sys.executable, "-m", "yololite.benchmark.sab_rf100vl", "--worker",
+        "--runtime", runtime_name,
+        "--onnx-path", onnx_path,
+        "--image-dir", image_dir,
+        "--annotations-path", annotations_path,
+    ]
+    if fp16:
+        cmd.append("--fp16")
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"worker exit {result.returncode}\nstderr:\n{result.stderr[-2000:]}"
+        )
+
+    for line in result.stdout.splitlines():
+        if line.startswith(_RESULT_MARKER):
+            return json.loads(line[len(_RESULT_MARKER):])
+    raise RuntimeError(f"worker produced no result line\nstdout:\n{result.stdout[-2000:]}")
+
+
 def benchmark_single(
     variant_name: str,
     dataset_name: str,
@@ -76,57 +144,25 @@ def benchmark_single(
     image_dir: str,
     annotations_path: str,
 ) -> list[dict]:
-    """Run SAB benchmarking for one (variant, dataset) pair.
-
-    Returns a list of result dicts, one per inference engine.
-    """
-    from sab.models.benchmark_yololite import (
-        YoloLiteONNXCPUInference,
-        YoloLiteTRTInference,
-    )
-    from sab.models.utils import ArtifactBenchmarkRequest, run_benchmark_on_artifact
-
+    """Run all 3 engines for one (variant, dataset) pair, each in a subprocess."""
     engines = [
-        ("ONNX-CPU", ArtifactBenchmarkRequest(
-            onnx_path=onnx_path,
-            inference_class=YoloLiteONNXCPUInference,
-            max_dets=500,
-        )),
-        ("TRT-fp32", ArtifactBenchmarkRequest(
-            onnx_path=onnx_path,
-            inference_class=YoloLiteTRTInference,
-            needs_fp16=False,
-            max_dets=500,
-        )),
-        ("TRT-fp16", ArtifactBenchmarkRequest(
-            onnx_path=onnx_path,
-            inference_class=YoloLiteTRTInference,
-            needs_fp16=True,
-            max_dets=500,
-        )),
+        ("ONNX-CPU", False),
+        ("TRT-fp32", False),
+        ("TRT-fp16", True),
     ]
 
     rows = []
-    for runtime_name, request in engines:
+    for runtime_name, fp16 in engines:
         try:
-            accuracy_stats, latency_stats, throttled = run_benchmark_on_artifact(
-                request, image_dir, annotations_path
+            stats = _run_one_engine_subprocess(
+                runtime_name, fp16, onnx_path, image_dir, annotations_path
             )
             rows.append({
                 "dataset": dataset_name,
                 "variant": variant_name,
                 "runtime": runtime_name,
-                "fp16": request.needs_fp16,
-                "mAP50": accuracy_stats[1] if len(accuracy_stats) > 1 else None,
-                "mAP50_95": accuracy_stats[0] if len(accuracy_stats) > 0 else None,
-                "AP75": accuracy_stats[2] if len(accuracy_stats) > 2 else None,
-                "AP_s": accuracy_stats[3] if len(accuracy_stats) > 3 else None,
-                "AP_m": accuracy_stats[4] if len(accuracy_stats) > 4 else None,
-                "AP_l": accuracy_stats[5] if len(accuracy_stats) > 5 else None,
-                "AR_maxdets": accuracy_stats[8] if len(accuracy_stats) > 8 else None,
-                "latency_median_ms": latency_stats.get("median"),
-                "latency_p95_ms": latency_stats.get("p95"),
-                "throttled": throttled,
+                "fp16": fp16,
+                **stats,
             })
         except Exception as e:
             print(f"  ERROR [{runtime_name}]: {e}")
@@ -134,16 +170,37 @@ def benchmark_single(
                 "dataset": dataset_name,
                 "variant": variant_name,
                 "runtime": runtime_name,
-                "fp16": request.needs_fp16,
+                "fp16": fp16,
                 "error": str(e),
             })
 
     return rows
 
 
+def worker_main():
+    """Entry point for the --worker subprocess mode."""
+    p = argparse.ArgumentParser()
+    p.add_argument("--worker", action="store_true")
+    p.add_argument("--runtime", required=True, choices=RUNTIMES)
+    p.add_argument("--onnx-path", required=True)
+    p.add_argument("--image-dir", required=True)
+    p.add_argument("--annotations-path", required=True)
+    p.add_argument("--fp16", action="store_true")
+    args = p.parse_args()
+
+    result = _run_one_engine_in_process(
+        args.runtime, args.fp16, args.onnx_path, args.image_dir, args.annotations_path
+    )
+    print(_RESULT_MARKER + json.dumps(result))
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
+    if "--worker" in sys.argv:
+        worker_main()
+        return
+
     parser = argparse.ArgumentParser(
         description="Run SAB benchmarking across all RF100-VL datasets",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
