@@ -143,6 +143,12 @@ def _wrap_with_decode(tf_model_dir: str, wrapped_dir: str,
     class DecodeWrapper(tf.Module):
         def __init__(self):
             super().__init__()
+            # Track the loaded object, not just its function. A ConvNeXt backbone
+            # converts with live tf.Variables (LayerNorm gamma/beta), and
+            # tf.saved_model.save refuses to export a function that captures
+            # variables no tracked object owns. EfficientNet folds its BatchNorm
+            # into constants, so this only bites the convnextv2_tiny backbone.
+            self._inner = inner
             self._inner_fn = inner_fn
 
         @tf.function(input_signature=[input_spec])
@@ -249,6 +255,8 @@ def _wrap_with_nms(decoded_dir: str, nms_dir: str, img_size: int,
     class NMSWrapper(tf.Module):
         def __init__(self):
             super().__init__()
+            # Same tracking requirement as DecodeWrapper above.
+            self._inner = inner
             self._inner_fn = inner_fn
 
         @tf.function(input_signature=[
@@ -420,6 +428,11 @@ def export_tfjs(
             enable_batchmatmul_unfold=True,
             output_signaturedefs=True,
             disable_group_convolution=True,
+            # onnx2tf 2.4.0 made flatbuffer_direct the default backend. That backend
+            # writes TFLite only, so the SavedModel step 3 loads below never appears.
+            # tf_converter is also the only path that converts the convnextv2_tiny
+            # backbone of yololite-l; flatbuffer_direct rejects it on GELU.
+            tflite_backend="tf_converter",
         )
         logger.info("✅ TensorFlow SavedModel created")
 
