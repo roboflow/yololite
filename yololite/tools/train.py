@@ -488,6 +488,9 @@ def run_training(config: dict, callbacks=None) -> dict:
                                    obj=f"{obj_m/(i+1):.4f}",
                                    cls=f"{cls_m/(i+1):.4f}")
 
+            if callbacks is not None and hasattr(callbacks, 'on_train_batch_end'):
+                callbacks.on_train_batch_end(epoch)
+
         avg_train = running / max(1, len(train_loader))
         train_losses.append(avg_train)
 
