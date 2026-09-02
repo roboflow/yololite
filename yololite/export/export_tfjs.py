@@ -420,6 +420,11 @@ def export_tfjs(
             enable_batchmatmul_unfold=True,
             output_signaturedefs=True,
             disable_group_convolution=True,
+            # onnx2tf 2.4.0 made flatbuffer_direct the default backend. That backend
+            # writes TFLite only, so the SavedModel step 3 loads below never appears.
+            # tf_converter is also the only path that converts the convnextv2_tiny
+            # backbone of yololite-l; flatbuffer_direct rejects it on GELU.
+            tflite_backend="tf_converter",
         )
         logger.info("✅ TensorFlow SavedModel created")
 
