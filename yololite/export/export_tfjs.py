@@ -143,6 +143,12 @@ def _wrap_with_decode(tf_model_dir: str, wrapped_dir: str,
     class DecodeWrapper(tf.Module):
         def __init__(self):
             super().__init__()
+            # Track the loaded object, not just its function. A ConvNeXt backbone
+            # converts with live tf.Variables (LayerNorm gamma/beta), and
+            # tf.saved_model.save refuses to export a function that captures
+            # variables no tracked object owns. EfficientNet folds its BatchNorm
+            # into constants, so this only bites the convnextv2_tiny backbone.
+            self._inner = inner
             self._inner_fn = inner_fn
 
         @tf.function(input_signature=[input_spec])
@@ -249,6 +255,8 @@ def _wrap_with_nms(decoded_dir: str, nms_dir: str, img_size: int,
     class NMSWrapper(tf.Module):
         def __init__(self):
             super().__init__()
+            # Same tracking requirement as DecodeWrapper above.
+            self._inner = inner
             self._inner_fn = inner_fn
 
         @tf.function(input_signature=[
