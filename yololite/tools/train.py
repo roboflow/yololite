@@ -430,6 +430,8 @@ def run_training(config: dict, callbacks=None) -> dict:
     for epoch in range(start_epoch, epochs):
         if callbacks is not None and hasattr(callbacks, 'should_stop') and callbacks.should_stop():
             break
+        if callbacks is not None and hasattr(callbacks, 'on_epoch_start'):
+            callbacks.on_epoch_start(epoch)
 
         if epoch == (int(epochs * 0.7)) and use_augment:
             train_ds.is_train = False
