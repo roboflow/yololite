@@ -356,7 +356,6 @@ def run_training(config: dict, callbacks=None) -> dict:
 
     start_epoch = 0
     best_metric = -1.0
-    best_metric_no_aug = -1.0
 
     # ---- load from checkpoint ----
     # If training_state is present, full resume (optimizer, scheduler, epoch, EMA).
@@ -381,7 +380,6 @@ def run_training(config: dict, callbacks=None) -> dict:
                     ema = ModelEMA(model, total_updates=total_updates, decay=ema_decay)
             start_epoch = ts.get("epoch", 0) + 1
             best_metric = ts.get("best_metric", -1.0)
-            best_metric_no_aug = ts.get("best_metric_no_aug", -1.0)
             scaler_state = ts.get("scaler")
             if scaler_state is not None:
                 scaler.load_state_dict(scaler_state)
@@ -420,7 +418,6 @@ def run_training(config: dict, callbacks=None) -> dict:
     os.makedirs(weight_folder, exist_ok=True)
     best_ckpt_path = os.path.join(weight_folder, "best_model_state.pt")
     last_ckpt_path = os.path.join(weight_folder, "last_model_state.pt")
-    best_no_aug = os.path.join(weight_folder, "best_no_aug.pt")
     metric_key = save_by
     val_thresh = 0.3
     coco_stats = {}
@@ -639,22 +636,15 @@ def run_training(config: dict, callbacks=None) -> dict:
             scheduler.step(avg_val)
 
         current = coco_stats[metric_key]
-        if (current > best_metric) and use_augment:
+        # Val metrics are computed the same way whether or not training
+        # augmentation is on, so a single best covers every phase.
+        if current > best_metric:
             best_metric = current
             model_eval_cpu = model_eval.to("cpu").eval()
             save_checkpoint_state(model_eval_cpu, coco_stats, class_names, config,
                                   best_ckpt_path, num_anchors_per_level, metric_key)
             model_eval.to(DEVICE).eval()
             print(f"✓ New best {metric_key}={best_metric:.4f} saved to {best_ckpt_path}")
-
-        # Save best model without augmentation
-        if (current > best_metric_no_aug) and not use_augment:
-            best_metric_no_aug = current
-            model_eval_cpu = model_eval.to("cpu").eval()
-            save_checkpoint_state(model_eval_cpu, coco_stats, class_names, config,
-                                  best_no_aug, num_anchors_per_level, metric_key)
-            model_eval.to(DEVICE).eval()
-            print(f"✓ New best {metric_key}={best_metric_no_aug:.4f} saved to {best_no_aug}")
 
         # Loss curve
         try:
@@ -678,7 +668,6 @@ def run_training(config: dict, callbacks=None) -> dict:
         _training_state = {
             "epoch": epoch,
             "best_metric": best_metric,
-            "best_metric_no_aug": best_metric_no_aug,
             "optimizer": optimizer.state_dict(),
             "scaler": scaler.state_dict() if use_amp else None,
         }
@@ -728,23 +717,13 @@ def run_training(config: dict, callbacks=None) -> dict:
         pass
 
     # Load best checkpoint for final evaluation
-    try:
-        ckpt = torch.load(best_ckpt_path, map_location=DEVICE)
-    except Exception:
-        ckpt = torch.load(best_no_aug, map_location=DEVICE)
+    final_best = best_ckpt_path if os.path.exists(best_ckpt_path) else last_ckpt_path
+    ckpt = torch.load(final_best, map_location=DEVICE)
     missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
     model.eval()
     best_metrics = evaluate_model(model=model, val_loader=val_loader, log_dir=log_dir,
                                    NUM_CLASSES=NUM_CLASSES, DEVICE=DEVICE, IMG_SIZE=IMG_SIZE,
                                    batch_size=batch_size, class_names=class_names)
-
-    # Resolve best checkpoint path
-    if os.path.exists(best_ckpt_path):
-        final_best = best_ckpt_path
-    elif os.path.exists(best_no_aug):
-        final_best = best_no_aug
-    else:
-        final_best = last_ckpt_path
 
     return {
         "best_checkpoint": final_best,
